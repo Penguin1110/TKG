@@ -1,0 +1,12 @@
+[project]
+name = "tkg-prior-reversion-pilot"
+version = "0.2.0"
+description = "TKG Prior-Reversion Pilot: does an LLM revert to a stale prior across multi-turn reasoning after being exposed to an updated fact?"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.uv]
+package = false

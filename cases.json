@@ -1,0 +1,484 @@
+{
+  "_schema_notes": "ripples/control 都以「距離」為 key（\"1\"/\"2\"/\"3\"），每個距離下是候選事實的 list。distance 1/2/3 目前都用 WebSearch 查證過真實新聞/官方來源才填入（新聞連結見對話記錄，沒有編造任何事實）；bestbuy_ceo 的 distance 3（Jason Bonfig 空出的 Chief Customer, Product and Fulfillment Officer 一職由誰接任）截至查證當下官方還沒公布繼任者，所以刻意留空陣列，而不是編造答案。design doc 建議每距離備 2-3 個候選，目前多數距離仍只有 1 個，擴充時比照現有格式新增元素即可。round schedule 只會抽「非空」的距離，因此留空陣列可以安全先跑 pilot。graph_walk（conflict arm）/control_graph_walk（control arm）是 Line A + Line B 合併版的曝光機制：劇本式的 5 步節點瀏覽（不用 OpenRouter tool-calling，純文字模擬），每一步的 facts 都跟同一個 case 的 ripples/control 事實對應，帶 as_of 時間戳；模型在每一步的自由文字回覆會被記錄，但不影響下一步顯示哪個節點（刻意排除「模型導航能力」這個干擾變數，只保留「曝光後會不會反悔」這個變數）。exposure_snippet 欄位保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
+  "distractor_questions": [
+    "What is the chemical symbol for gold?",
+    "What is the capital of Japan?",
+    "How many strings does a standard violin have?",
+    "What is the tallest mountain in Africa?",
+    "What year did the Berlin Wall fall?",
+    "What is the boiling point of water at sea level in Celsius?",
+    "Who wrote the play 'Hamlet'?",
+    "What is the largest planet in our solar system?"
+  ],
+  "cases": [
+    {
+      "id": "portugal_first_lady",
+      "category": "politics",
+      "pk_question": "Who is the current First Lady of Portugal?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["vacant", "no first lady", "none", "unmarried", "Cavaco Silva", "Rita Amaral Cabral"],
+      "new_answer_keywords": ["Margarida", "Maldonado Freitas"],
+      "exposure_snippet": "On 9 March 2026, Margarida Maldonado Freitas became First Lady of Portugal as the wife of newly inaugurated President Antonio Jose Seguro. She stated that there is no official role of First Lady in the country and chose not to have an office, continuing her work as a pharmacist and only accompanying her husband when required.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理葡萄牙總統府現況的簡報。",
+      "graph_walk": [
+        {"node": "葡萄牙總統府", "as_of": null,
+         "facts": ["現任總統：António José Seguro"],
+         "neighbors": ["第一夫人角色", "總理", "國會"]},
+        {"node": "第一夫人角色", "as_of": "2026-03-09",
+         "facts": ["現任：Margarida Maldonado Freitas（Seguro 總統之妻）"],
+         "neighbors": ["Margarida Maldonado Freitas 本人", "前任第一夫人 Rita Amaral Cabral"]},
+        {"node": "Margarida Maldonado Freitas 本人", "as_of": null,
+         "facts": ["出生於 1970 年，來自 Caldas da Rainha"],
+         "neighbors": ["公開活動", "媒體報導"]},
+        {"node": "公開活動", "as_of": null,
+         "facts": ["曾多次陪同總統出席公開場合"],
+         "neighbors": ["媒體報導"]},
+        {"node": "媒體報導", "as_of": null,
+         "facts": ["葡萄牙媒體持續關注她如何詮釋第一夫人這個角色"],
+         "neighbors": ["第一夫人角色"]}
+      ],
+      "control_graph_walk": [
+        {"node": "葡萄牙", "as_of": null, "facts": ["位於伊比利半島西南部"],
+         "neighbors": ["首都", "政治體制", "官方語言"]},
+        {"node": "首都", "as_of": null, "facts": ["葡萄牙的首都是 Lisbon"], "neighbors": ["政治體制"]},
+        {"node": "政治體制", "as_of": null, "facts": ["葡萄牙於 1910 年成為共和國"], "neighbors": ["官方語言"]},
+        {"node": "官方語言", "as_of": null, "facts": ["葡萄牙的官方語言是葡萄牙語（Portuguese）"], "neighbors": ["國旗與象徵"]},
+        {"node": "國旗與象徵", "as_of": null, "facts": ["葡萄牙國旗由綠色與紅色組成，中央為國徽"], "neighbors": ["首都"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "Does the current First Lady of Portugal maintain an official office or staff?",
+            "paraphrases": [
+              "Has Portugal's current First Lady set up an official office with staff?",
+              "Did the current First Lady of Portugal accept an official office for her role?"
+            ],
+            "old_keywords": ["yes", "has an office", "staff"],
+            "new_keywords": ["no", "declined", "no office", "does not have"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What is the professional occupation of Portugal's current First Lady?",
+            "paraphrases": [
+              "What job does Portugal's current First Lady currently hold?",
+              "By profession, what does Portugal's current First Lady do for work?"
+            ],
+            "old_keywords": ["unknown", "no information", "none"],
+            "new_keywords": ["pharmacist"]
+          },
+          {
+            "question": "How many pharmacies does Portugal's current First Lady own or manage?",
+            "paraphrases": [
+              "How many family pharmacies does Portugal's current First Lady run?",
+              "What number of pharmacies is Portugal's current First Lady the technical director of?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["two", "2"]
+          }
+        ],
+        "3": [
+          {
+            "question": "Is Portugal's current First Lady a member of the National Association of Pharmacies?",
+            "paraphrases": [
+              "Does Portugal's current First Lady belong to the National Association of Pharmacies?",
+              "Has Portugal's current First Lady been part of the National Association of Pharmacies?"
+            ],
+            "old_keywords": ["unknown", "no", "not a member"],
+            "new_keywords": ["yes", "member", "National Association of Pharmacies"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "What is the capital of Portugal?",
+            "paraphrases": ["Which city is the capital of Portugal?", "Name Portugal's capital city."],
+            "answer_keywords": ["Lisbon"]
+          }
+        ],
+        "2": [
+          {
+            "question": "In what year did Portugal become a republic?",
+            "paraphrases": ["When did Portugal transition to a republic?", "What year did the Portuguese monarchy end?"],
+            "answer_keywords": ["1910"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What is the official language of Portugal?",
+            "paraphrases": ["What language is officially spoken in Portugal?", "Which language does Portugal recognize as official?"],
+            "answer_keywords": ["Portuguese"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "honduras_first_lady",
+      "category": "politics",
+      "pk_question": "Who is the current First Lady or First Gentleman of Honduras?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Manuel Zelaya", "Xiomara Castro", "first gentleman"],
+      "new_answer_keywords": ["Lissette", "del Cid", "Asfura"],
+      "exposure_snippet": "Nasry Asfura was inaugurated President of Honduras, and his wife Lissette del Cid Fernandez assumed the role of First Lady of Honduras on 27 January 2026, succeeding Manuel Zelaya, who had served as First Gentleman under President Xiomara Castro.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理宏都拉斯總統府現況的簡報。",
+      "graph_walk": [
+        {"node": "宏都拉斯總統府", "as_of": null,
+         "facts": ["現任總統：Nasry Asfura"],
+         "neighbors": ["第一夫人辦公室", "內閣", "國會"]},
+        {"node": "第一夫人辦公室", "as_of": "2026-01-27",
+         "facts": ["現任：Lissette del Cid（Asfura 總統之妻）",
+                   "接替先前擔任第一先生的 Manuel Zelaya（Xiomara Castro 總統任內）"],
+         "neighbors": ["Lissette del Cid 本人", "前第一先生 Manuel Zelaya"]},
+        {"node": "Lissette del Cid 本人", "as_of": null,
+         "facts": ["來自 Intibucá 省的 Santa Lucía，1985 年與 Asfura 結婚"],
+         "neighbors": ["近期活動", "近期公益活動"]},
+        {"node": "近期活動", "as_of": null,
+         "facts": ["近期出席多場總統府公開活動"],
+         "neighbors": ["近期公益活動"]},
+        {"node": "近期公益活動", "as_of": "2026-03",
+         "facts": ["近期赴 Pespire 發放糧食援助、赴 Cayos Cochinos 發放學用品"],
+         "neighbors": ["第一夫人辦公室"]}
+      ],
+      "control_graph_walk": [
+        {"node": "宏都拉斯", "as_of": null, "facts": ["位於中美洲"], "neighbors": ["首都", "貨幣", "官方語言"]},
+        {"node": "首都", "as_of": null, "facts": ["宏都拉斯的首都是 Tegucigalpa"], "neighbors": ["貨幣"]},
+        {"node": "貨幣", "as_of": null, "facts": ["宏都拉斯使用的貨幣是 lempira"], "neighbors": ["官方語言"]},
+        {"node": "官方語言", "as_of": null, "facts": ["宏都拉斯的官方語言是西班牙語（Spanish）"], "neighbors": ["地理"]},
+        {"node": "地理", "as_of": null, "facts": ["宏都拉斯濱臨加勒比海與太平洋"], "neighbors": ["首都"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What is the occupation of Honduras's current First Lady?",
+            "paraphrases": [
+              "What does Honduras's current First Lady do professionally?",
+              "By profession, what is Honduras's current First Lady known for?"
+            ],
+            "old_keywords": ["unknown", "politician"],
+            "new_keywords": ["philanthropist"]
+          }
+        ],
+        "2": [
+          {
+            "question": "How many children does Honduras's current First Lady have?",
+            "paraphrases": [
+              "How many kids does Honduras's current First Lady have?",
+              "What is the number of children belonging to Honduras's current First Lady?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["three", "3 daughters", "3"]
+          }
+        ],
+        "3": [
+          {
+            "question": "How many grandchildren does Honduras's current First Lady have?",
+            "paraphrases": [
+              "What is the number of grandchildren Honduras's current First Lady has?",
+              "How many grandkids does Honduras's current First Lady have?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["four", "4"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "What is the capital of Honduras?",
+            "paraphrases": ["Which city is the capital of Honduras?", "Name Honduras's capital city."],
+            "answer_keywords": ["Tegucigalpa"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What currency is used in Honduras?",
+            "paraphrases": ["What is the official currency of Honduras?", "Which currency do people use in Honduras?"],
+            "answer_keywords": ["lempira"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What is the official language of Honduras?",
+            "paraphrases": ["What language is officially spoken in Honduras?", "Which language does Honduras recognize as official?"],
+            "answer_keywords": ["Spanish"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "apple_ceo",
+      "category": "corporate",
+      "pk_question": "Who is the CEO of Apple?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Tim Cook"],
+      "new_answer_keywords": ["Ternus", "John Ternus"],
+      "exposure_snippet": "Apple announced that Tim Cook will become Executive Chairman of Apple's board, while John Ternus, Apple's senior vice president of Hardware Engineering, will become CEO effective September 1, 2026.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理 Apple 目前高層領導團隊的簡報。",
+      "graph_walk": [
+        {"node": "Apple", "as_of": null,
+         "facts": ["總部位於 Cupertino"],
+         "neighbors": ["CEO職位", "董事會", "Hardware Engineering部門"]},
+        {"node": "CEO職位", "as_of": "2026-09-01",
+         "facts": ["現任：John Ternus（自 2026-09-01 起生效）", "前任 CEO 是 Tim Cook"],
+         "neighbors": ["John Ternus 本人", "Executive Chairman職位"]},
+        {"node": "John Ternus 本人", "as_of": null,
+         "facts": ["在 Apple 任職超過十年，以工程背景受到重視"],
+         "neighbors": ["Hardware Engineering部門", "Executive Chairman職位"]},
+        {"node": "Executive Chairman職位", "as_of": null,
+         "facts": ["是公司治理架構中偏重監督與策略諮詢的資深職位"],
+         "neighbors": ["Hardware Engineering部門"]},
+        {"node": "Hardware Engineering部門", "as_of": null,
+         "facts": ["負責 iPhone、Mac 等產品線的核心硬體研發"],
+         "neighbors": ["CEO職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "Apple", "as_of": null, "facts": ["總部位於 Cupertino"], "neighbors": ["成立年份", "共同創辦人", "股票代號"]},
+        {"node": "成立年份", "as_of": null, "facts": ["Apple 於 1976 年成立"], "neighbors": ["共同創辦人"]},
+        {"node": "共同創辦人", "as_of": null, "facts": ["除了 Steve Jobs，另一位共同創辦人是 Steve Wozniak"], "neighbors": ["股票代號"]},
+        {"node": "股票代號", "as_of": null, "facts": ["Apple 在 NASDAQ 掛牌，代號 AAPL"], "neighbors": ["產品線"]},
+        {"node": "產品線", "as_of": null, "facts": ["主要產品線包含 iPhone、Mac、iPad"], "neighbors": ["成立年份"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What was John Ternus's role at Apple before becoming CEO?",
+            "paraphrases": [
+              "Before being named CEO, what position did John Ternus hold at Apple?",
+              "What job title did John Ternus have at Apple prior to his promotion to CEO?"
+            ],
+            "old_keywords": ["unknown", "no information", "not aware"],
+            "new_keywords": ["hardware engineering", "senior vice president"]
+          },
+          {
+            "question": "Which retired Apple executive did John Ternus rehire as he took over as CEO?",
+            "paraphrases": [
+              "As part of his CEO transition, which retired executive did John Ternus bring back to Apple?",
+              "Who is the retired Apple executive that John Ternus recruited back onto his management team?"
+            ],
+            "old_keywords": ["unknown", "no information", "not aware"],
+            "new_keywords": ["Laura Legros"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What role does Tim Cook hold at Apple after stepping down as CEO?",
+            "paraphrases": [
+              "After leaving the CEO position, what title does Tim Cook now hold at Apple?",
+              "What is Tim Cook's current position at Apple following the leadership change?"
+            ],
+            "old_keywords": ["unknown", "still CEO", "retired"],
+            "new_keywords": ["executive chairman", "chairman"]
+          }
+        ],
+        "3": [
+          {
+            "question": "Who succeeded John Ternus as head of Hardware Engineering at Apple?",
+            "paraphrases": [
+              "After John Ternus became CEO, who took over leading Apple's Hardware Engineering team?",
+              "Who now leads Apple's hardware organization following John Ternus's move to CEO?"
+            ],
+            "old_keywords": ["unknown", "no information", "not aware"],
+            "new_keywords": ["Johny Srouji", "Srouji"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "In what city is Apple headquartered?",
+            "paraphrases": ["Where is Apple's headquarters located?", "Which city is home to Apple's headquarters?"],
+            "answer_keywords": ["Cupertino"]
+          }
+        ],
+        "2": [
+          {
+            "question": "In what year was Apple founded?",
+            "paraphrases": ["When was Apple founded?", "What year did Apple get started as a company?"],
+            "answer_keywords": ["1976"]
+          }
+        ],
+        "3": [
+          {
+            "question": "Who co-founded Apple alongside Steve Jobs?",
+            "paraphrases": ["Which person co-founded Apple with Steve Jobs?", "Name Apple's other co-founder besides Steve Jobs."],
+            "answer_keywords": ["Wozniak"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "bestbuy_ceo",
+      "category": "corporate",
+      "pk_question": "Who is the CEO of Best Buy?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Corie Barry"],
+      "new_answer_keywords": ["Bonfig", "Jason Bonfig"],
+      "exposure_snippet": "Best Buy announced that CEO Corie Barry will step down from her roles as CEO and board member on October 31, 2026. Jason Bonfig, Best Buy's Chief Customer, Product and Fulfillment Officer, will become CEO and join the board.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理 Best Buy 目前高層領導團隊的簡報。",
+      "graph_walk": [
+        {"node": "Best Buy", "as_of": null,
+         "facts": ["成立於 1966 年"],
+         "neighbors": ["CEO職位", "董事會", "Chief Customer職位"]},
+        {"node": "CEO職位", "as_of": "2026-10-31",
+         "facts": ["即將接任：Jason Bonfig", "現任 Corie Barry 將於 2026 年 10 月 31 日卸任 CEO 與董事職務"],
+         "neighbors": ["Jason Bonfig 本人", "Corie Barry"]},
+        {"node": "Jason Bonfig 本人", "as_of": null,
+         "facts": ["1999 年以庫存分析師身分加入 Best Buy"],
+         "neighbors": ["先前職位", "公司背景"]},
+        {"node": "公司背景", "as_of": null,
+         "facts": ["以消費性電子產品零售起家，是美國指標性零售商之一"],
+         "neighbors": ["先前職位"]},
+        {"node": "先前職位", "as_of": null,
+         "facts": ["Bonfig 卸任後，這個職位的繼任人選截至目前官方尚未公布"],
+         "neighbors": ["CEO職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "Best Buy", "as_of": null, "facts": ["總部位於美國明尼蘇達州"], "neighbors": ["總部城市", "成立年份", "股票代號"]},
+        {"node": "總部城市", "as_of": null, "facts": ["總部所在城市是 Richfield, Minnesota"], "neighbors": ["成立年份"]},
+        {"node": "成立年份", "as_of": null, "facts": ["Best Buy 成立於 1966 年"], "neighbors": ["股票代號"]},
+        {"node": "股票代號", "as_of": null, "facts": ["Best Buy 在紐約證交所掛牌，代號 BBY"], "neighbors": ["業務範圍"]},
+        {"node": "業務範圍", "as_of": null, "facts": ["主要業務是消費性電子產品零售"], "neighbors": ["總部城市"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What position did Jason Bonfig hold at Best Buy before becoming CEO?",
+            "paraphrases": [
+              "Before his promotion to CEO, what was Jason Bonfig's role at Best Buy?",
+              "What title did Jason Bonfig have at Best Buy prior to becoming CEO?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["chief customer", "product and fulfillment"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What number CEO in Best Buy's history will Jason Bonfig be?",
+            "paraphrases": [
+              "Jason Bonfig will become which numbered CEO in Best Buy's company history?",
+              "How many CEOs, including Jason Bonfig, will Best Buy have had in its history?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["sixth", "6th", "6"]
+          }
+        ],
+        "3": []
+      },
+      "control": {
+        "1": [
+          {
+            "question": "In what U.S. state is Best Buy headquartered?",
+            "paraphrases": ["Where is Best Buy's headquarters located?", "Which state is home to Best Buy's headquarters?"],
+            "answer_keywords": ["Minnesota", "Richfield"]
+          }
+        ],
+        "2": [
+          {
+            "question": "In what year was Best Buy founded?",
+            "paraphrases": ["When was Best Buy founded?", "What year did Best Buy get started as a company?"],
+            "answer_keywords": ["1966"]
+          }
+        ],
+        "3": []
+      }
+    },
+    {
+      "id": "peru_president",
+      "category": "politics",
+      "pk_question": "Who is the President of Peru?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Dina Boluarte", "Boluarte"],
+      "new_answer_keywords": ["Fujimori", "Keiko"],
+      "exposure_snippet": "Keiko Fujimori was sworn in as President of Peru on 28 July 2026, after winning the June 2026 presidential election by a narrow margin of fewer than 50,000 votes. She is the daughter of former president Alberto Fujimori, who was imprisoned for human rights abuses.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理秘魯總統府現況的簡報。",
+      "graph_walk": [
+        {"node": "秘魯總統府", "as_of": null,
+         "facts": ["位於首都 Lima"],
+         "neighbors": ["總統職位", "副總統", "內閣"]},
+        {"node": "總統職位", "as_of": "2026-07-28",
+         "facts": ["現任：Keiko Fujimori（2026 年 7 月 28 日就職）"],
+         "neighbors": ["Keiko Fujimori 本人", "副總統"]},
+        {"node": "Keiko Fujimori 本人", "as_of": null,
+         "facts": ["長期投身秘魯政壇，曾多次參選總統"],
+         "neighbors": ["政府體制", "副總統"]},
+        {"node": "政府體制", "as_of": null,
+         "facts": ["秘魯實行總統制，總統任期五年"],
+         "neighbors": ["部會架構"]},
+        {"node": "部會架構", "as_of": null,
+         "facts": ["內閣涵蓋 18 個部會，橫跨內政、外交、經濟等領域"],
+         "neighbors": ["總統職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "秘魯", "as_of": null, "facts": ["位於南美洲西部"], "neighbors": ["首都", "官方語言", "貨幣"]},
+        {"node": "首都", "as_of": null, "facts": ["秘魯的首都是 Lima"], "neighbors": ["官方語言"]},
+        {"node": "官方語言", "as_of": null, "facts": ["秘魯的官方語言是西班牙語（Spanish）"], "neighbors": ["貨幣"]},
+        {"node": "貨幣", "as_of": null, "facts": ["秘魯使用的貨幣是 Sol"], "neighbors": ["地理"]},
+        {"node": "地理", "as_of": null, "facts": ["秘魯境內涵蓋安地斯山脈與亞馬遜雨林"], "neighbors": ["首都"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "Who is Keiko Fujimori's father, and what happened to him?",
+            "paraphrases": [
+              "What is the name of Keiko Fujimori's father, and what was his fate?",
+              "Keiko Fujimori's father previously held what position, and what legal outcome did he face?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["Alberto Fujimori", "imprisoned", "jailed"]
+          }
+        ],
+        "2": [
+          {
+            "question": "By what margin did Keiko Fujimori win the presidential election?",
+            "paraphrases": [
+              "How narrow was Keiko Fujimori's margin of victory in the presidential election?",
+              "What was the vote margin by which Keiko Fujimori won the presidency?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["50,000", "fewer than 50000", "narrow"]
+          }
+        ],
+        "3": [
+          {
+            "question": "Who are Peru's vice presidents under President Keiko Fujimori?",
+            "paraphrases": [
+              "Name the first and second vice presidents serving under Keiko Fujimori.",
+              "Who was sworn in as Peru's vice presidents alongside Keiko Fujimori?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["Luis Galarreta", "Miguel Torres", "Galarreta", "Torres"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "What is the capital of Peru?",
+            "paraphrases": ["Which city is the capital of Peru?", "Name Peru's capital city."],
+            "answer_keywords": ["Lima"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What is the official language of Peru?",
+            "paraphrases": ["What language is officially spoken in Peru?", "Which language does Peru recognize as official?"],
+            "answer_keywords": ["Spanish"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What is the official currency of Peru?",
+            "paraphrases": ["What currency does Peru use?", "Name Peru's official currency."],
+            "answer_keywords": ["Sol", "sol"]
+          }
+        ]
+      }
+    }
+  ]
+}
