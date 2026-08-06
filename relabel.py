@@ -37,7 +37,7 @@ def build_lookup(cases_data):
 
 
 def relabel_row(row, lookup):
-    if row["slot"] in ("exposure", "distractor", "explore"):
+    if row["slot"] in ("exposure", "distractor", "explore", "checkpoint"):
         return row  # 這幾種本來就不判斷關鍵字，維持原樣
 
     case_lookup = lookup.get(row["case_id"])

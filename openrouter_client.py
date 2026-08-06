@@ -63,10 +63,27 @@ def call_model(model: str, messages: list, temperature: float = 0.0,
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=timeout)
-            resp.raise_for_status()
+            if not resp.ok:
+                # 把 OpenRouter 回傳的錯誤內容（通常會講清楚原因：模型代號錯、缺參數、
+                # 額度用完等）一起帶出來，不然只看 raise_for_status() 的通用文字完全
+                # 看不出問題在哪
+                try:
+                    detail = resp.json().get("error", {}).get("message", resp.text)
+                except Exception:
+                    detail = resp.text
+                message = f"HTTP {resp.status_code}：{detail}"
+                # 4xx（除了 429 rate limit）是請求本身有問題，不是暫時性的，重試也會
+                # 得到一樣的結果，直接放棄比較快；5xx／429／逾時才值得重試（用
+                # RuntimeError 交給下面 except Exception 走重試路徑，OpenRouterError
+                # 則直接往外拋、跳過重試迴圈）
+                if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                    raise OpenRouterError(f"呼叫 {model} 失敗（client error，不重試）：{message}")
+                raise RuntimeError(message)
             data = resp.json()
             return data["choices"][0]["message"]["content"]
-        except Exception as e:  # noqa: BLE001 - MVP 階段先統一接住重試
+        except OpenRouterError:
+            raise  # fail-fast：直接往外拋，不進入下面的重試邏輯
+        except Exception as e:  # noqa: BLE001 - 網路/逾時/429/5xx 等真正暫時性的錯誤才重試
             last_err = e
             wait = 2 ** attempt
             print(f"[warn] call_model 第 {attempt} 次失敗（{e}），{wait}s 後重試...")

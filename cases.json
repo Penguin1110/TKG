@@ -1,5 +1,5 @@
 {
-  "_schema_notes": "ripples/control 都以「距離」為 key（\"1\"/\"2\"/\"3\"），每個距離下是候選事實的 list。distance 1/2/3 目前都用 WebSearch 查證過真實新聞/官方來源才填入（新聞連結見對話記錄，沒有編造任何事實）；bestbuy_ceo 的 distance 3（Jason Bonfig 空出的 Chief Customer, Product and Fulfillment Officer 一職由誰接任）截至查證當下官方還沒公布繼任者，所以刻意留空陣列，而不是編造答案。design doc 建議每距離備 2-3 個候選，目前多數距離仍只有 1 個，擴充時比照現有格式新增元素即可。round schedule 只會抽「非空」的距離，因此留空陣列可以安全先跑 pilot。graph_walk（conflict arm）/control_graph_walk（control arm）是 Line A + Line B 合併版的曝光機制：劇本式的 5 步節點瀏覽（不用 OpenRouter tool-calling，純文字模擬），每一步的 facts 都跟同一個 case 的 ripples/control 事實對應，帶 as_of 時間戳；模型在每一步的自由文字回覆會被記錄，但不影響下一步顯示哪個節點（刻意排除「模型導航能力」這個干擾變數，只保留「曝光後會不會反悔」這個變數）。exposure_snippet 欄位保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
+  "_schema_notes": "ripples/control 都以「距離」為 key（\"1\"/\"2\"/\"3\"），每個距離下是候選事實的 list。distance 1/2/3 目前都用 WebSearch 查證過真實新聞/官方來源才填入（新聞連結見對話記錄，沒有編造任何事實）；bestbuy_ceo 的 distance 3（Jason Bonfig 空出的 Chief Customer, Product and Fulfillment Officer 一職由誰接任）截至查證當下官方還沒公布繼任者，所以刻意留空陣列，而不是編造答案。design doc 建議每距離備 2-3 個候選，目前多數距離仍只有 1 個，擴充時比照現有格式新增元素即可。round schedule 只會抽「非空」的距離，因此留空陣列可以安全先跑 pilot。7 個案例涵蓋政治(3)/企業(2)/金融(1)/體育(1)，fed_chair 跟 manutd_coach 是後來補的，graph_walk 從一開始寫就沒有洩漏 ripple 答案（吸取了前面版本的教訓，寫資料時已用關鍵字掃描驗證過）。graph_walk（conflict arm）/control_graph_walk（control arm）是 Line A + Line B 合併版的曝光機制：劇本式的 5 步節點瀏覽（不用 OpenRouter tool-calling，純文字模擬），每一步的 facts 都跟同一個 case 的 ripples/control 事實對應，帶 as_of 時間戳；模型在每一步的自由文字回覆會被記錄，但不影響下一步顯示哪個節點（刻意排除「模型導航能力」這個干擾變數，只保留「曝光後會不會反悔」這個變數）。exposure_snippet 欄位保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
   "distractor_questions": [
     "What is the chemical symbol for gold?",
     "What is the capital of Japan?",
@@ -476,6 +476,192 @@
             "question": "What is the official currency of Peru?",
             "paraphrases": ["What currency does Peru use?", "Name Peru's official currency."],
             "answer_keywords": ["Sol", "sol"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "fed_chair",
+      "category": "finance",
+      "pk_question": "Who is the current Chair of the Federal Reserve?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Jerome Powell", "Powell"],
+      "new_answer_keywords": ["Kevin Warsh", "Warsh"],
+      "exposure_snippet": "Kevin Warsh was sworn in as the 17th Chair of the Federal Reserve on May 22, 2026, replacing Jerome Powell, whose term as chair ended on May 15, 2026. Warsh will serve a four-year term ending May 21, 2030. Powell has said he plans to remain on as a Fed governor, a role whose term expires in 2028, until a Justice Department investigation into the central bank's Washington headquarters renovation is fully resolved.",
+      "_exposure_snippet_note": "保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
+      "exploration_task": "你的任務是幫忙整理美國聯邦準備理事會（Fed）目前領導層現況的簡報。",
+      "graph_walk": [
+        {"node": "聯邦準備理事會（Fed）", "as_of": null,
+         "facts": ["負責制定美國貨幣政策"],
+         "neighbors": ["主席職位", "理事會成員", "貨幣政策"]},
+        {"node": "主席職位", "as_of": "2026-05-22",
+         "facts": ["現任：Kevin Warsh（2026-05-22 宣誓就職，任期至 2030 年）", "前任主席是 Jerome Powell"],
+         "neighbors": ["Kevin Warsh 本人", "Jerome Powell 本人"]},
+        {"node": "Kevin Warsh 本人", "as_of": null,
+         "facts": ["被外界視為鷹派，重視抑制通膨"],
+         "neighbors": ["Jerome Powell 本人", "貨幣政策"]},
+        {"node": "Jerome Powell 本人", "as_of": null,
+         "facts": ["自 2018 年起擔任聯準會主席"],
+         "neighbors": ["貨幣政策"]},
+        {"node": "貨幣政策", "as_of": null,
+         "facts": ["聯準會的法定雙重使命是穩定物價與最大就業"],
+         "neighbors": ["主席職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "聯邦準備理事會", "as_of": null, "facts": ["總部位於 Washington, D.C."], "neighbors": ["成立年份", "組織架構", "雙重使命"]},
+        {"node": "成立年份", "as_of": null, "facts": ["聯準會成立於 1913 年"], "neighbors": ["組織架構"]},
+        {"node": "組織架構", "as_of": null, "facts": ["由 12 個地區聯邦準備銀行組成"], "neighbors": ["雙重使命"]},
+        {"node": "雙重使命", "as_of": null, "facts": ["法定雙重使命是物價穩定與最大就業"], "neighbors": ["歷史"]},
+        {"node": "歷史", "as_of": null, "facts": ["Fed 是美國的中央銀行體系"], "neighbors": ["成立年份"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What Fed-related role did Kevin Warsh hold before becoming chair?",
+            "paraphrases": [
+              "Before becoming chair, what position did Kevin Warsh previously hold at the Federal Reserve?",
+              "What was Kevin Warsh's earlier connection to the Federal Reserve Board?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["Federal Reserve Board", "Fed governor", "board member"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What is Jerome Powell's role at the Federal Reserve after his term as chair ended?",
+            "paraphrases": [
+              "After stepping down as chair, what position does Jerome Powell still hold at the Fed?",
+              "What is Jerome Powell doing at the Federal Reserve now that he is no longer chair?"
+            ],
+            "old_keywords": ["unknown", "no longer at the Fed", "retired"],
+            "new_keywords": ["governor", "Fed governor", "remains"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What is the Justice Department investigating at the Federal Reserve that led Powell to stay on as governor?",
+            "paraphrases": [
+              "What DOJ investigation is Jerome Powell waiting to be resolved before fully leaving the Fed?",
+              "What is being investigated regarding the Federal Reserve's headquarters?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["renovation", "headquarters renovation", "building renovation"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "In what city is the Federal Reserve headquartered?",
+            "paraphrases": ["Where is the Federal Reserve's headquarters located?", "Which city is home to the Fed's headquarters?"],
+            "answer_keywords": ["Washington"]
+          }
+        ],
+        "2": [
+          {
+            "question": "In what year was the Federal Reserve established?",
+            "paraphrases": ["When was the Federal Reserve founded?", "What year was the Fed created?"],
+            "answer_keywords": ["1913"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What is the Federal Reserve's official dual mandate?",
+            "paraphrases": ["What two goals make up the Fed's legal dual mandate?", "Name the Federal Reserve's dual mandate."],
+            "answer_keywords": ["price stability", "maximum employment", "stable prices"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "manutd_coach",
+      "category": "sports",
+      "pk_question": "Who is the current head coach or manager of Manchester United?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Ruben Amorim", "Amorim", "Erik ten Hag", "ten Hag"],
+      "new_answer_keywords": ["Michael Carrick", "Carrick"],
+      "exposure_snippet": "Ruben Amorim was dismissed as Manchester United head coach in January 2026 after fewer than 14 months in charge. Darren Fletcher took interim charge before Michael Carrick was appointed head coach, initially on an interim basis and then permanently in May 2026 following a strong finish to the season; Carrick signed a new contract running to 2028. Amorim was later appointed head coach of AC Milan, replacing Massimiliano Allegri, who was dismissed after Milan finished fifth in Serie A.",
+      "_exposure_snippet_note": "保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
+      "exploration_task": "你的任務是幫忙整理 Manchester United 目前教練團隊現況的簡報。",
+      "graph_walk": [
+        {"node": "Manchester United", "as_of": null,
+         "facts": ["主場位於 Old Trafford"],
+         "neighbors": ["總教練職位", "董事會", "球隊近況"]},
+        {"node": "總教練職位", "as_of": "2026-05",
+         "facts": ["現任：Michael Carrick（2026 年 5 月正式接任，合約至 2028 年）", "前任是 Ruben Amorim（2026 年 1 月遭解僱）"],
+         "neighbors": ["Michael Carrick 本人", "Ruben Amorim 本人"]},
+        {"node": "Michael Carrick 本人", "as_of": null,
+         "facts": ["曾是 Manchester United 的球員，退役後轉任教練工作"],
+         "neighbors": ["Ruben Amorim 本人", "球隊近況"]},
+        {"node": "Ruben Amorim 本人", "as_of": null,
+         "facts": ["來自葡萄牙，執教風格強調三後衛陣型"],
+         "neighbors": ["球隊近況"]},
+        {"node": "球隊近況", "as_of": null,
+         "facts": ["近幾個賽季戰績起伏，管理層多次調整教練團隊"],
+         "neighbors": ["總教練職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "Manchester United", "as_of": null, "facts": ["主場位於 Old Trafford"], "neighbors": ["成立年份", "主場", "暱稱"]},
+        {"node": "成立年份", "as_of": null, "facts": ["俱樂部成立於 1878 年"], "neighbors": ["主場"]},
+        {"node": "主場", "as_of": null, "facts": ["主場 Old Trafford 可容納超過 7 萬名觀眾"], "neighbors": ["暱稱"]},
+        {"node": "暱稱", "as_of": null, "facts": ["球隊暱稱是 Red Devils（紅魔）"], "neighbors": ["聯賽等級"]},
+        {"node": "聯賽等級", "as_of": null, "facts": ["參加英格蘭足球超級聯賽（Premier League）"], "neighbors": ["成立年份"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "Who served as interim Manchester United head coach between Amorim's dismissal and Carrick's permanent appointment?",
+            "paraphrases": [
+              "Before Michael Carrick was made permanent, who took interim charge of Manchester United?",
+              "Who briefly managed Manchester United on an interim basis in early 2026?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["Darren Fletcher", "Fletcher"]
+          }
+        ],
+        "2": [
+          {
+            "question": "Which club did Ruben Amorim join after leaving Manchester United?",
+            "paraphrases": [
+              "After his Manchester United exit, which club appointed Ruben Amorim as head coach?",
+              "Where did Ruben Amorim end up managing after being sacked by Manchester United?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["AC Milan", "Milan"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What Serie A finishing position led to the coaching change that Amorim eventually filled at his new club?",
+            "paraphrases": [
+              "What league position prompted Amorim's new club to dismiss their previous coach?",
+              "Where did Amorim's new club finish in Serie A before making the coaching change?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["fifth", "5th"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "In what city is Manchester United based?",
+            "paraphrases": ["Which city is Manchester United from?", "Name the city that Manchester United represents."],
+            "answer_keywords": ["Manchester"]
+          }
+        ],
+        "2": [
+          {
+            "question": "In what year was Manchester United founded?",
+            "paraphrases": ["When was Manchester United founded?", "What year was the club established?"],
+            "answer_keywords": ["1878"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What is the name of Manchester United's home stadium?",
+            "paraphrases": ["Where does Manchester United play its home matches?", "Name Manchester United's home ground."],
+            "answer_keywords": ["Old Trafford"]
           }
         ]
       }

@@ -25,6 +25,8 @@ test_dryrun.py                    不用真的打 API，用模擬回應驗證流
 relabel.py                        judge.py/cases.json 關鍵字修正後，用來重新
                                    分類 results.jsonl 裡已經打過 API 的原始回應，
                                    不必重花額度重整組實驗（用法見下方）
+backfill_checkpoints.py           一次性工具：幫沒有 checkpoint 紀錄的舊資料
+                                   補寫 checkpoint（用法見下方，通常只需要跑一次）
 pyproject.toml / uv.lock          uv 管理的依賴
 ```
 
@@ -69,6 +71,33 @@ uv run python analyze.py
   增加每格樣本數，bootstrap CI 才有意義——design doc 建議 pilot 每格 5-10 次
 - 結果會累加寫進 `results.jsonl`（append 模式，重跑不會覆蓋舊資料，想重新開始
   就手動刪掉這個檔案）
+
+### Checkpoint／續跑：想多測幾個模型時不用重花已經花過的錢
+
+`run_experiment.py` 每完成一個 (case, model, repeat, arm) 就會寫一筆 `slot:"checkpoint"`
+紀錄。下次執行時會先讀 `results.jsonl` 裡已經有的 checkpoint，已經完成的組合直接跳過，
+只跑缺的部分——最常見的用法是「想多加測幾個模型」：
+
+```bash
+uv run python run_experiment.py --models "openai/gpt-4.1-mini,anthropic/claude-sonnet-4.5,google/gemini-2.5-pro" --repeats 5
+```
+
+前兩個模型如果已經跑過，會印 `[checkpoint] 跳過 ...`，只有新加的 `google/gemini-2.5-pro`
+真的會打 API。也適用於「跑到一半斷線/手動中斷」的情況——重新執行同一條指令會自動接續，
+只有真正跑失敗、沒完整跑完的那個 arm 會重跑（那一個 arm 可能會有少量重複資料，這是
+刻意的簡化：checkpoint 是「整個 arm」這個粒度，不是每一輪都存檔，換取實作簡單）。
+
+**如果你手上已經有「加 checkpoint 機制之前」跑出來的 `results.jsonl`**（沒有任何
+`slot:"checkpoint"` 紀錄），直接重跑會被誤判成「什麼都沒跑過」而整組重來一次。
+先跑一次性的補檔工具，把舊資料反推出 checkpoint 再繼續：
+
+```bash
+uv run python backfill_checkpoints.py --input results.jsonl
+```
+
+它會重算當初的 round_schedule、比對實際列數是否剛好對得上，抓不完整的 arm 會印
+`[skip]` 訊息並保留原樣（下次執行 `run_experiment.py` 會整個 arm 重跑一次），完整的
+才補寫 checkpoint。這個工具只需要對每份舊資料跑一次。
 
 跑完後 `run_experiment.py` 會印出每個 case 的 PK 探針 kill gate 結果（先驗夠不夠強、
 有沒有過門檻），`analyze.py` 會輸出兩份 CSV：

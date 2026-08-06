@@ -136,3 +136,19 @@ if __name__ == "__main__":
     assert any(a == "control" for (_, a, _, _) in cells), "control arm 沒有產生任何資料列"
     assert any(a == "conflict" for (_, a, _, _) in cells), "conflict arm 沒有產生任何資料列"
     print("\n[OK] dry-run 通過：conflict/control 兩個 arm 都有資料，流程跑得通。")
+
+    print("\n--- checkpoint 機制 round-trip 測試 ---")
+    ckpt_path = "dryrun_checkpoint_test.jsonl"
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)
+    with open(ckpt_path, "a", encoding="utf-8") as fh:
+        run_experiment._write_checkpoint(fh, "case_x", "model_y", "conflict", repeat_idx=0)
+        run_experiment._write_checkpoint(fh, "case_x", "model_y", "control", repeat_idx=0)
+        run_experiment._write_checkpoint(fh, "case_x", "model_y", "conflict", repeat_idx=1)
+    completed = run_experiment.load_completed_arms(ckpt_path)
+    assert ("case_x", "model_y", 0, "conflict") in completed
+    assert ("case_x", "model_y", 0, "control") in completed
+    assert ("case_x", "model_y", 1, "conflict") in completed
+    assert ("case_x", "model_y", 1, "control") not in completed, "沒寫過的組合不該出現在 completed 裡"
+    os.remove(ckpt_path)
+    print("[OK] checkpoint write/load round-trip 正確：已完成的 (case,model,repeat,arm) 能被正確辨識、跳過。")

@@ -148,13 +148,14 @@ def run_pk_probe(case: dict, model: str, log_fh, repeat_idx: int) -> str:
 
 
 def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule: list,
-            log_fh, rng: random.Random, repeat_idx: int) -> None:
+            log_fh, rng: random.Random, repeat_idx: int) -> bool:
+    """回傳 True 代表這個 arm 的曝光+追問全部成功跑完，checkpoint 才會記這個 arm 完成。"""
     case_id = case["id"]
     fact_pool = case["ripples"] if arm == "conflict" else case["control"]
 
     history = []
     if not run_graph_exploration(case, model, arm, history, log_fh, case_id, repeat_idx):
-        return
+        return False
 
     occurrence_counter = {}
     for round_idx, slot in enumerate(round_schedule, start=1):
@@ -165,7 +166,7 @@ def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule:
                 response = call_model(model, history)
             except OpenRouterError as e:
                 print(f"[error] round {round_idx} 失敗 case={case_id} model={model} arm={arm}: {e}")
-                break
+                return False
             history.append({"role": "assistant", "content": response})
             _write_row(log_fh, case_id, model, arm=arm, round_idx=round_idx, slot="distractor",
                        distance=None, occurrence=None, question=question, response=response,
@@ -187,7 +188,7 @@ def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule:
             response = call_model(model, history)
         except OpenRouterError as e:
             print(f"[error] round {round_idx} 失敗 case={case_id} model={model} arm={arm}: {e}")
-            break
+            return False
         history.append({"role": "assistant", "content": response})
 
         if arm == "conflict":
@@ -200,6 +201,8 @@ def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule:
                    distance=distance, occurrence=occurrence_counter[distance],
                    question=question, response=response, label=label, repeat_idx=repeat_idx)
         print(f"[r{round_idx}:{slot_name}_d{distance}] {case_id} / {model} / {arm}: {label}")
+
+    return True
 
 
 def _write_row(fh, case_id, model, arm, round_idx, slot, distance, occurrence,
@@ -220,6 +223,42 @@ def _write_row(fh, case_id, model, arm, round_idx, slot, distance, occurrence,
     }
     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     fh.flush()
+
+
+def _write_checkpoint(fh, case_id, model, arm, repeat_idx):
+    """
+    一個 arm（conflict 包含 PK 探針、control 不含）全部成功跑完後寫一筆 checkpoint
+    紀錄。之後重跑（例如想多測幾個模型）時，load_completed_arms() 會讀這些紀錄，
+    已經完成的 (case, model, repeat, arm) 組合就跳過，不用重花錢重問一次。
+
+    只在整個 arm 都成功跑完才寫，中途失敗（run_arm 回傳 False）不會寫，這樣下次
+    重跑會整個 arm 重來一次（可能造成那個 arm 少量重複資料，但換來實作簡單、
+    checkpoint 語意清楚：有 checkpoint = 這個 arm 完整且乾淨）。
+    """
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "case_id": case_id, "model": model, "arm": arm, "repeat": repeat_idx,
+        "round": 0, "slot": "checkpoint", "distance": None, "occurrence": None,
+        "question": None, "response": None, "label": "done",
+    }
+    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    fh.flush()
+
+
+def load_completed_arms(path: str) -> set:
+    """回傳已經完成的 (case_id, model, repeat, arm) 組合集合，讀自舊的 checkpoint 紀錄。"""
+    completed = set()
+    if not os.path.exists(path):
+        return completed
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if row.get("slot") == "checkpoint":
+                completed.add((row["case_id"], row["model"], row["repeat"], row["arm"]))
+    return completed
 
 
 def available_distances(case: dict) -> list:
@@ -269,32 +308,45 @@ def main():
         print("[error] 請先在 .env 或環境變數設定 OPENROUTER_API_KEY", file=sys.stderr)
         sys.exit(1)
 
+    completed = load_completed_arms(args.output)
+    if completed:
+        print(f"[checkpoint] 從 {args.output} 讀到 {len(completed)} 個已完成的 (case,model,repeat,arm)，會跳過")
+
     with open(args.output, "a", encoding="utf-8") as log_fh:
         for model in models:
             for case in cases:
+                case_id = case["id"]
                 distances = available_distances(case)
                 pk_labels = []
                 for repeat_idx in range(args.repeats):
-                    rng = random.Random(args.seed + repeat_idx * 1000 + hash(case["id"]) % 997)
+                    needed_arms = [a for a in arms if (case_id, model, repeat_idx, a) not in completed]
+                    if not needed_arms:
+                        print(f"[checkpoint] 跳過 case={case_id} model={model} repeat={repeat_idx}（已完成）")
+                        continue
+
+                    rng = random.Random(args.seed + repeat_idx * 1000 + hash(case_id) % 997)
                     round_schedule = build_round_schedule(distances, args.rounds, args.distractor_every, rng)
 
-                    print(f"=== case={case['id']} model={model} repeat={repeat_idx} "
-                          f"schedule={round_schedule} ===")
+                    print(f"=== case={case_id} model={model} repeat={repeat_idx} "
+                          f"needed_arms={needed_arms} schedule={round_schedule} ===")
 
-                    if "conflict" in arms:
-                        pk_labels.append(run_pk_probe(case, model, log_fh, repeat_idx))
-                        run_arm(case, model, "conflict", distractors, round_schedule,
-                                log_fh, rng, repeat_idx)
-                    if "control" in arms:
-                        run_arm(case, model, "control", distractors, round_schedule,
-                                log_fh, rng, repeat_idx)
+                    if "conflict" in needed_arms:
+                        pk_label = run_pk_probe(case, model, log_fh, repeat_idx)
+                        pk_labels.append(pk_label)
+                        if pk_label != "error" and run_arm(case, model, "conflict", distractors,
+                                                            round_schedule, log_fh, rng, repeat_idx):
+                            _write_checkpoint(log_fh, case_id, model, "conflict", repeat_idx)
+                    if "control" in needed_arms:
+                        if run_arm(case, model, "control", distractors, round_schedule,
+                                   log_fh, rng, repeat_idx):
+                            _write_checkpoint(log_fh, case_id, model, "control", repeat_idx)
 
                 if pk_labels:
                     strong_prior_rate = pk_labels.count("stick_old") / len(pk_labels)
                     threshold = case.get("pk_threshold", 0.8)
                     verdict = "OK" if strong_prior_rate >= threshold else "WARN 先驗不夠強，建議從分析中剔除"
-                    print(f"[kill-gate:pk] case={case['id']} model={model} "
-                          f"stick_old_rate={strong_prior_rate:.2f} (threshold={threshold}) -> {verdict}")
+                    print(f"[kill-gate:pk] case={case_id} model={model} "
+                          f"stick_old_rate={strong_prior_rate:.2f} (threshold={threshold}, 只算這次新跑的) -> {verdict}")
 
     print(f"完成，結果寫入 {args.output}")
 
