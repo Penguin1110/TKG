@@ -147,15 +147,25 @@ def run_pk_probe(case: dict, model: str, log_fh, repeat_idx: int) -> str:
     return pk_label
 
 
-def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule: list,
-            log_fh, rng: random.Random, repeat_idx: int) -> bool:
-    """回傳 True 代表這個 arm 的曝光+追問全部成功跑完，checkpoint 才會記這個 arm 完成。"""
+def run_round_schedule(case: dict, model: str, arm: str, distractors: list, round_schedule: list,
+                        log_fh, rng: random.Random, repeat_idx, history: list) -> bool:
+    """
+    Line B：接在曝光步驟後面的交錯距離多輪追問。故意獨立出來（不含曝光步驟），
+    是因為曝光機制現在有兩種來源會共用這段邏輯：
+      1. 舊版劇本式路徑（run_arm() 下面接著呼叫，history 由 run_graph_exploration() 產生）
+      2. 新版自由探索（run_free_exploration_batch.py 直接呼叫，history 是
+         graph_exploration_agent.run_free_exploration() 回傳的、走到 pivot 那一刻
+         為止的完整對話記錄）
+    這樣「接上 Line B」的程式碼只有一份，不用維護兩套。
+
+    repeat_idx 允許是 int（舊版排程）或 str（自由探索批次用複合 id，例如
+    "d1_Q123_r0"），這裡跟後面的 analyze.py 都只把它當成不透明的分組 key，
+    不要求一定是整數。
+
+    回傳 True 代表整段追問都成功跑完，呼叫端應該在這之後才寫 checkpoint。
+    """
     case_id = case["id"]
     fact_pool = case["ripples"] if arm == "conflict" else case["control"]
-
-    history = []
-    if not run_graph_exploration(case, model, arm, history, log_fh, case_id, repeat_idx):
-        return False
 
     occurrence_counter = {}
     for round_idx, slot in enumerate(round_schedule, start=1):
@@ -203,6 +213,22 @@ def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule:
         print(f"[r{round_idx}:{slot_name}_d{distance}] {case_id} / {model} / {arm}: {label}")
 
     return True
+
+
+def run_arm(case: dict, model: str, arm: str, distractors: list, round_schedule: list,
+            log_fh, rng: random.Random, repeat_idx: int) -> bool:
+    """
+    舊版劇本式路徑專用的薄包裝：跑 5 步 graph_walk 曝光，成功的話再接上
+    run_round_schedule()。新版自由探索不走這個函式，是直接呼叫
+    run_round_schedule()（見該函式的說明）。
+    回傳 True 代表這個 arm 的曝光+追問全部成功跑完，checkpoint 才會記這個 arm 完成。
+    """
+    case_id = case["id"]
+    history = []
+    if not run_graph_exploration(case, model, arm, history, log_fh, case_id, repeat_idx):
+        return False
+    return run_round_schedule(case, model, arm, distractors, round_schedule,
+                               log_fh, rng, repeat_idx, history)
 
 
 def _write_row(fh, case_id, model, arm, round_idx, slot, distance, occurrence,

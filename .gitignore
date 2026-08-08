@@ -7,6 +7,9 @@ __pycache__/
 .venv/
 venv/
 
+# local Wikidata API cache (regenerable, can be large)
+tkg_cache*.db
+
 # dry-run / checkpoint test outputs (test_dryrun.py)
 dryrun_results.jsonl
 dryrun_checkpoint_test.jsonl
@@ -18,6 +21,7 @@ dryrun_checkpoint_test.jsonl
 # transparency rather than treated as disposable build artifacts.
 results_legacy_v1.jsonl
 results_prerelabel_backup*.jsonl
+results_prerelabel_final.jsonl
 results_v2_*.jsonl
 results_v3_*.jsonl
 results_relabeled*.jsonl

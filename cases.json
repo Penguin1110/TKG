@@ -14,6 +14,7 @@
     {
       "id": "portugal_first_lady",
       "category": "politics",
+      "_pivot_qid_note": "沒有標 pivot_qid，選項B（自由探索）目前跑不了這個 case。查證過 Wikidata 上『First Lady of Portugal』有一個位置實體（Q18464230，instance of: position），但它本身沒有可查詢的 officeholder/current-holder claim（不像 Apple/Man Utd/Fed/Peru 那樣，組織或國家實體上直接有帶時間戳的職位持有人清單）——First Lady 在葡萄牙不是正式憲政職位（案例本身的曝光內容也提到這點），Wikidata 沒有用同一套『組織持有職位』的建模方式記錄它，這是真實資料結構的限制，不是查證不夠仔細。",
       "pk_question": "Who is the current First Lady of Portugal?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["vacant", "no first lady", "none", "unmarried", "Cavaco Silva", "Rita Amaral Cabral"],
@@ -117,6 +118,7 @@
     {
       "id": "honduras_first_lady",
       "category": "politics",
+      "_pivot_qid_note": "沒有標 pivot_qid，選項B（自由探索）目前跑不了這個 case。查證過 Wikidata 上『First Lady of Honduras』有一個位置實體（Q6570926，instance of: position/title），但一樣沒有可查詢的 officeholder/current-holder claim，跟 portugal_first_lady 是同一類限制（First Lady 類角色在 Wikidata 上普遍沒有用『組織持有職位』的方式建模，見該案例的說明）。",
       "pk_question": "Who is the current First Lady or First Gentleman of Honduras?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Manuel Zelaya", "Xiomara Castro", "first gentleman"],
@@ -211,6 +213,10 @@
     {
       "id": "apple_ceo",
       "category": "corporate",
+      "pivot_qid": "Q312",
+      "control_pivot_candidates": ["Q2283", "Q182477", "Q380", "Q3884"],
+      "control_position_property_label": "chief executive officer",
+      "_pivot_qid_note": "Apple Inc. 本身（不是某個職位實體）。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：Q312 的 claims 裡有帶 start/end time qualifier 的完整 CEO 任職歷史（Tim Cook 2011-08-24~至今、以及一筆 2026-09-01 起生效但尚未有英文 label 的新條目，label 缺失是 Wikidata 資料本身近期才更新、還沒補齊的真實限制，不是程式的 bug）。是目前 7 個案例裡唯一標了 pivot_qid 的，其餘 6 個還需要各自查證才能跑選項 B 的自由探索，見 README「選項 B」章節。",
       "pk_question": "Who is the CEO of Apple?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Tim Cook"],
@@ -313,6 +319,7 @@
     {
       "id": "bestbuy_ceo",
       "category": "corporate",
+      "_pivot_qid_note": "沒有標 pivot_qid，選項B（自由探索）目前跑不了這個 case。查證過 Best Buy 的 Wikidata 條目（Q533415），chief executive officer claim 只有 'Hubert Joly'（沒有任何時間戳，且 Hubert Joly 早在 2019 年就卸任，比本案的 old_answer_keywords Corie Barry 還早一任）——Wikidata 上這個條目沒有跟上真實世界的異動，不是程式能解決的問題，寧可不設 pivot_qid 也不要用一個已知過時的節點硬跑。等 Wikidata 條目更新後可以重新查證。",
       "pk_question": "Who is the CEO of Best Buy?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Corie Barry"],
@@ -390,6 +397,10 @@
     {
       "id": "peru_president",
       "category": "politics",
+      "pivot_qid": "Q419",
+      "control_pivot_candidates": ["Q34", "Q17", "Q20"],
+      "control_position_property_label": "head of state",
+      "_pivot_qid_note": "Peru（國家實體本身）。已 live 驗證：Q419 的 head of state claims 完整帶時間戳，含 'Keiko Fujimori（2026-07-28 ~ 至今）'——真實 Wikidata 資料顯示 Boluarte（2022-12-07~2025-10-10）之後其實還經過 José Jerí、José María Balcázar 兩任過渡總統才到 Fujimori，不是直接接續，但這不影響 old_answer_keywords 用 Boluarte（模型訓練時間點更早，不會知道後面這幾任）。control_pivot_candidates 是三個長年沒換國家元首的君主立憲國（Q34 瑞典：Carl XVI Gustaf 自 1973 至今、Q17 日本、Q20 挪威），已驗證瑞典國王符合『近期沒有更替』（>50 年）。**曾經有的洩漏問題已修好**：一開始用 check_pivot_leak() 驗到 distance-1 的 ripple（Keiko 父親是 Alberto Fujimori）被判成洩漏——因為 Alberto Fujimori 自己也曾是秘魯總統，Q419 的 head of state claims 預設會回傳完整歷史（回溯到 1872 年），pivot 節點的 facts 天生就會帶到這個名字。後來把 wikidata_graph_backend.py 改成預設只回傳「現在仍然有效」的 claims（`current_only=True`，這才是 TKG 該有的『查詢 as of 現在』語意，不是把整份歷史檔案攤開），Alberto Fujimori 那筆是已結束的歷史 claim（1990~2000），過濾掉之後 check_pivot_leak() 已驗證乾淨，選項 B 現在可以正常跑這個 case。",
       "pk_question": "Who is the President of Peru?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Dina Boluarte", "Boluarte"],
@@ -483,6 +494,10 @@
     {
       "id": "fed_chair",
       "category": "finance",
+      "pivot_qid": "Q53536",
+      "control_pivot_candidates": ["Q8901", "Q333101", "Q183231"],
+      "control_position_property_label": "chairperson",
+      "_pivot_qid_note": "Federal Reserve System（不是 Chair of the Federal Reserve 那個職位實體 Q2666591，那個節點沒有可查詢的 officeholder claims）。已 live 驗證：Q53536 的 chairperson claims 完整帶時間戳，一路到 'Kevin Warsh（2026-05-22 ~ 至今）'，前一任是 'Jerome Powell（2018-02-05 ~ 2026-05-15）'，跟本案 old/new_answer_keywords 完全對上。control_pivot_candidates 是三家長年沒換行長/主席的央行（Q8901 歐洲央行：Christine Lagarde 自 2019 至今、Q333101 日本銀行、Q183231 英格蘭銀行），已驗證歐洲央行符合『近期沒有更替』。**曾經有的洩漏問題已修好**：一開始用 check_pivot_leak() 驗到 distance-2 的 ripple 被判成洩漏，查了發現是假警報——命中的是 Q53536 上『child organization or unit: Board of Governors of the Federal Reserve System』這條常態性事實（機構名稱裡剛好有 governor 這個字），不是真的洩漏 Powell 卸任後的去向。根源是 new_keywords 裡原本有一個太籠統的單字 'governor'，改成只留 'Fed governor'／'Federal Reserve governor' 這種更精確的片語後，check_pivot_leak() 已驗證乾淨（順便修正了 judge.classify() 可能因為同一個籠統關鍵字誤判真實回應的風險）。加上 wikidata_graph_backend.py 改成預設 current_only（只回傳現在仍然有效的 claims），選項 B 現在可以正常跑這個 case。",
       "pk_question": "Who is the current Chair of the Federal Reserve?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Jerome Powell", "Powell"],
@@ -534,7 +549,7 @@
               "What is Jerome Powell doing at the Federal Reserve now that he is no longer chair?"
             ],
             "old_keywords": ["unknown", "no longer at the Fed", "retired"],
-            "new_keywords": ["governor", "Fed governor", "remains"]
+            "new_keywords": ["Fed governor", "Federal Reserve governor"]
           }
         ],
         "3": [
@@ -576,6 +591,10 @@
     {
       "id": "manutd_coach",
       "category": "sports",
+      "pivot_qid": "Q18656",
+      "control_pivot_candidates": ["Q8701", "Q15789", "Q1130849"],
+      "control_position_property_label": "head coach",
+      "_pivot_qid_note": "Manchester United F.C.。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：Q18656 的 head coach claims 完整帶時間戳，一路到 'Michael Carrick（2026-01-13 ~ 至今）'，跟本案的 new_answer_keywords 完全對上，中間也能看到 Ruben Amorim（2024-11-11~2026-01-05）跟 Erik ten Hag（2022-07-01~2024-10-28）對應 old_answer_keywords。control_pivot_candidates 是三家長年沒換教練的球隊（Q8701 Atlético Madrid：Diego Simeone 自 2011 年至今、Q15789 FC Bayern Munich、Q1130849 Liverpool F.C.），已驗證 Atlético Madrid 確實符合『近期沒有更替』（>10 年）。**曾經有的洩漏問題已修好**：一開始用 check_pivot_leak() 驗到 distance-1 的 ripple（過渡教練 Darren Fletcher）被判成洩漏——因為 Fletcher 本人也在 Q18656 的 head coach 完整歷史清單裡（他當過短暫的過渡教練，2021 跟 2026 各代理過一次），跟 peru_president 是同一類問題。改成 wikidata_graph_backend.py 預設 current_only（只回傳現在仍然有效的 claims）之後，Fletcher 那兩段代理任期都已結束、被過濾掉，check_pivot_leak() 已驗證乾淨，選項 B 現在可以正常跑這個 case。",
       "pk_question": "Who is the current head coach or manager of Manchester United?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Ruben Amorim", "Amorim", "Erik ten Hag", "ten Hag"],

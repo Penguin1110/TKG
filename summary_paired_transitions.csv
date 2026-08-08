@@ -1,0 +1,6 @@
+model,stable_correct,reversion,recovery,stable_incorrect,reversion_rate_pct,mcnemar_p
+anthropic/claude-sonnet-4.5,15,1,4,20,6.2,0.375
+google/gemma-4-31b-it,8,5,3,24,38.5,0.7265625
+openai/gpt-4.1-mini,8,1,5,26,11.1,0.21875
+openai/o4-mini,11,4,1,24,26.7,0.375
+qwen/qwen3-max,14,0,4,22,0.0,0.125
