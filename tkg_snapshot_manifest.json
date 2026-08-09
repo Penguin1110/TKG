@@ -1,0 +1,40 @@
+{
+  "built_at": "2026-08-09T06:36:10.768705+00:00",
+  "cache_path": "tkg_cache.db",
+  "cases_file": "cases.json",
+  "seed_qids": [
+    "Q312",
+    "Q2283",
+    "Q182477",
+    "Q380",
+    "Q3884"
+  ],
+  "max_depth": 1,
+  "branch_cap": 25,
+  "nodes_in_cache_before": 0,
+  "nodes_in_cache_after": 116,
+  "nodes_newly_cached": 116,
+  "build_seconds": 610.9,
+  "per_seed_frontier_sizes": {
+    "Q312": {
+      "0": 1,
+      "1": 25
+    },
+    "Q2283": {
+      "0": 1,
+      "1": 25
+    },
+    "Q182477": {
+      "0": 1,
+      "1": 25
+    },
+    "Q380": {
+      "0": 1,
+      "1": 19
+    },
+    "Q3884": {
+      "0": 1,
+      "1": 25
+    }
+  }
+}

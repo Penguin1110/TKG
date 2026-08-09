@@ -37,7 +37,8 @@ import sys
 from datetime import datetime, timezone
 
 from graph_exploration_agent import run_free_exploration
-from run_experiment import build_round_schedule, run_round_schedule, available_distances
+from openrouter_client import call_model, OpenRouterError
+from run_experiment import build_round_schedule, run_round_schedule, run_pk_probe, available_distances
 from wikidata_graph_backend import WikidataGraphBackend
 
 NEUTRAL_TASK_PROMPT_TEMPLATE = (
@@ -48,6 +49,26 @@ NEUTRAL_TASK_PROMPT_TEMPLATE = (
 # 注意：這個 prompt 刻意寫成中性、探索導向，不能改成任何暗示「往哪個方向走」
 # 的文字（例如提到 case 的主題、公司名、職位名）。一旦暗示，就不再是「碰巧
 # 路過」，整個自然命中率的量測就沒有意義了。
+
+TRANSITION_PROMPT = (
+    "你的探索已經結束，探索工具已經不能用了。接下來我會直接問你幾個問題，"
+    "請盡你所知回答——不是只能用你剛剛在圖上親眼看到的內容，你自己原本就"
+    "知道的任何相關知識都可以拿來回答，不確定的話也可以用推論或最佳猜測，"
+    "不用堅持一定要在圖上親眼查過才敢回答。"
+)
+# 踩過的坑 1（第一次真的跑）：探索階段是 tool-calling（call_model_with_tools），
+# Line B 的追問是純文字（call_model()，不帶 tools 參數）。如果直接把探索結束時
+# 的 messages 原封不動接上 Line B 的第一個問題，模型會因為看到自己前面一直在
+# 用工具、現在卻沒有 tools 可用而卡住，回答變成「請讓我先查看 XX 節點的資訊」
+# 這種話，不會真的回答問題。
+#
+# 踩過的坑 2（修完坑 1 之後又踩到）：加了轉場訊息之後，模型不再要求用工具了，
+# 但變成回答「根據目前已知的資訊，我沒有相關資料，因此無法回答」——這不是
+# 先驗反悔訊號，是轉場訊息的措辭「根據你目前已知的資訊」被模型理解成「只能用
+# 探索時親眼看到的內容」，把自己原本的訓練知識也一起關掉了。這違背了 Line B
+# 的設計初衷（跟選項 A 一樣，ripple 問題本來就是要模型用自己的知識＋剛學到的
+# pivot fact 去推論，不是要它把答案寫在探索過程裡讓模型照抄）。改成明確告訴
+# 模型「不是只能用圖上看到的，你自己原本知道的知識都可以用」之後才解決。
 
 
 class RestrictedSubgraphBackend:
@@ -99,15 +120,31 @@ def check_pivot_leak(pivot_facts: list, case: dict) -> dict:
 
 def find_pre_seen_ripple_distances(trajectory: list, case: dict, pivot_qid: str) -> list:
     """
-    掃探索過程中所有 view_current_node() 的結果（排除 pivot 節點自己，那個已經
-    用 check_pivot_leak 另外把關），看模型是不是在正式被問 ripple 問題之前，
-    自己就已經在探索中看過某個距離的答案關鍵字了。這不是要阻止或懲罰，是
-    要記錄下來當一個分析維度（見 README「洩漏檢查的語意重新定義」）。
+    掃探索過程中所有「有揭露 facts 內容」的步驟結果（view_current_node()，
+    以及 move_to()——現在 move_to 也會自動帶出目的地節點的 facts，模擬真的
+    點連結會看到頁面內容，見 graph_exploration_agent.py 的說明），排除 pivot
+    節點自己被看到的那次（那個已經用 check_pivot_leak() 另外把關），看模型
+    是不是在正式被問 ripple 問題之前，自己就已經在探索中看過某個距離的答案
+    關鍵字了。這不是要阻止或懲罰，是要記錄下來當一個分析維度（見 README
+    「洩漏檢查的語意重新定義」）。
+
+    排除 pivot 節點的判斷：view_current_node() 看的是 step["from_qid"]（那一步
+    當下所在的節點）；move_to() 揭露的是「移動過去的目的地」，也就是
+    step["args"]["neighbor_id"]，不是 from_qid（from_qid 在 move_to 的情況下
+    是移動前的起點，跟被揭露內容的節點不是同一個，混用會把 pivot 自己的內容
+    誤判成別的節點洩漏，或反過來漏判）。
     """
     seen = set()
     for step in trajectory:
-        if step["action"] != "view_current_node" or step["from_qid"] == pivot_qid:
+        if step["action"] == "view_current_node":
+            revealed_qid = step["from_qid"]
+        elif step["action"] == "move_to" and "錯誤" not in step["result"]:
+            revealed_qid = step.get("args", {}).get("neighbor_id")
+        else:
             continue
+        if revealed_qid == pivot_qid:
+            continue
+
         text = step["result"].lower()
         for distance, items in case.get("ripples", {}).items():
             for item in items:
@@ -156,9 +193,32 @@ def load_completed_explorations(path: str) -> set:
     return completed
 
 
+def _apply_line_b_transition(model: str, messages: list, plain_call_model_fn) -> bool:
+    """
+    探索結束、要接上 Line B 之前，用一輪純文字明確告訴模型「探索結束了，
+    接下來直接用你已知的資訊回答，沒有工具可以用」，並取得它的回覆——這一輪
+    會被附加進 messages，讓 Line B 的第一個問題不是緊接在最後一次 tool 回應
+    後面。回傳 False 代表這輪呼叫失敗，呼叫端不該再接 Line B。
+
+    沒有這一步的話，模型會因為看到自己前面一直在用工具、現在卻沒有 tools
+    可用而卡住，回答變成「請讓我先查看 XX 節點的資訊」這種話，不會真的
+    回答問題——這是實測第一次真的跑選項 B 時發現的，見這個檔案開頭的
+    TRANSITION_PROMPT 說明。
+    """
+    messages.append({"role": "user", "content": TRANSITION_PROMPT})
+    try:
+        response = plain_call_model_fn(model, messages)
+    except OpenRouterError as e:
+        print(f"[error] Line B 轉場失敗：{e}")
+        return False
+    messages.append({"role": "assistant", "content": response})
+    return True
+
+
 def run_one_exploration(model, backend, start_qid, pivot_qid, max_steps, temperature,
-                         case, arm, distance, repeat_idx, log_fh, call_model_fn=None):
-    """跑一趟自由探索 + 記錄逐步 trajectory，回傳這趟的結果 dict（含 hit/miss）。"""
+                         case, arm, distance, repeat_idx, log_fh, call_model_fn=None,
+                         plain_call_model_fn=call_model):
+    """跑一趟自由探索 + 記錄逐步 trajectory，回傳這趟的結果 dict（含 hit/miss/line_b_ready）。"""
     kwargs = {}
     if call_model_fn is not None:
         kwargs["call_model_fn"] = call_model_fn
@@ -167,6 +227,10 @@ def run_one_exploration(model, backend, start_qid, pivot_qid, max_steps, tempera
         task_prompt=NEUTRAL_TASK_PROMPT_TEMPLATE.format(max_steps=max_steps),
         target_qid=pivot_qid, temperature=temperature, **kwargs,
     )
+
+    result["line_b_ready"] = False
+    if result["hit"]:
+        result["line_b_ready"] = _apply_line_b_transition(model, result["messages"], plain_call_model_fn)
 
     for step in result["trajectory"]:
         _write_row(log_fh, case["id"], model, arm=arm, round_idx=0, slot="free_explore",
@@ -188,8 +252,41 @@ def run_one_exploration(model, backend, start_qid, pivot_qid, max_steps, tempera
     return result
 
 
+PK_PROBE_REPEATS = 5
+
+
+def run_pk_probes_if_needed(case, model, log_fh, completed, arm):
+    """
+    選項 A（run_experiment.py）本來就有 PK 探針當 kill gate；選項 B 一開始
+    漏掉了這一步（第一次真的跑才發現：沒有 PK 探針，完全不知道這次測到的
+    模型對這個 pivot 事實的先驗夠不夠強，反悔宣稱沒有立足點）。這裡補上，
+    只在 conflict arm 跑（PK 探針測的是對 pivot fact 本身的先驗，跟 control
+    arm 無關）。用跟 free_explore_checkpoint 一樣的機制記錄完成度，重跑時
+    已經測過的不會重測。
+    """
+    if arm != "conflict":
+        return
+    case_id = case["id"]
+    pk_labels = []
+    for repeat_idx in range(PK_PROBE_REPEATS):
+        key = (case_id, model, arm, "pk", "pk", repeat_idx)
+        if key in completed:
+            print(f"[checkpoint] 跳過 PK 探針 {key}（已完成）")
+            continue
+        label = run_pk_probe(case, model, log_fh, repeat_idx)
+        pk_labels.append(label)
+        _write_explore_checkpoint(log_fh, case_id, model, arm, "pk", "pk", repeat_idx)
+    if pk_labels:
+        rate = pk_labels.count("stick_old") / len(pk_labels)
+        threshold = case.get("pk_threshold", 0.8)
+        verdict = "OK" if rate >= threshold else "WARN 先驗不夠強，建議從分析中剔除"
+        print(f"[kill-gate:pk] case={case_id} model={model} stick_old_rate={rate:.2f} "
+              f"(threshold={threshold}, 只算這次新跑的) -> {verdict}")
+
+
 def run_case_model(case, model, backend, args, log_fh, completed, rng, hit_counts,
-                    arm="conflict", pivot_qid=None, walker_factory=None, skip_leak_check=False):
+                    arm="conflict", pivot_qid=None, walker_factory=None, skip_leak_check=False,
+                    plain_call_model_fn=call_model):
     """
     arm="conflict" 時用 case["pivot_qid"]、接 Line B 的 case["ripples"]；
     arm="control" 時呼叫端要另外算好 control pivot_qid 傳進來（見
@@ -200,13 +297,16 @@ def run_case_model(case, model, backend, args, log_fh, completed, rng, hit_count
     每個 (start_qid, repeat_idx) 都要重新 call 一次拿全新實例（各自獨立的隨機
     路徑），不能在多趟探索之間共用同一個 walker——它有內部狀態（目前在哪個節點）。
     正式模式（非 dry-run）不傳，run_one_exploration 就會用真的
-    openrouter_client.call_model_with_tools。
+    openrouter_client.call_model_with_tools。plain_call_model_fn 同理，是給
+    PK 探針/Line B 轉場這種純文字呼叫用的（--dry-run 會換成 mock）。
     """
     case_id = case["id"]
     pivot_qid = pivot_qid or case.get("pivot_qid")
     if not pivot_qid:
         print(f"[skip] case={case_id} arm={arm} 沒有 pivot_qid，跳過")
         return
+
+    run_pk_probes_if_needed(case, model, log_fh, completed, arm)
 
     if not skip_leak_check:
         pivot_node = backend.fetch_node(pivot_qid)
@@ -244,16 +344,20 @@ def run_case_model(case, model, backend, args, log_fh, completed, rng, hit_count
                 result = run_one_exploration(
                     model, explore_backend, start_qid, pivot_qid, args.max_steps,
                     args.temperature, case, arm, distance, repeat_idx, log_fh,
-                    call_model_fn=call_model_fn,
+                    call_model_fn=call_model_fn, plain_call_model_fn=plain_call_model_fn,
                 )
                 hit_counts[(model, case_id, arm, distance)]["attempts"] += 1
                 if result["hit"]:
                     hit_counts[(model, case_id, arm, distance)]["hits"] += 1
-                    composite_repeat = f"d{distance}_{start_qid}_{repeat_idx}"
-                    round_schedule = build_round_schedule(
-                        available_distances(case), args.rounds, args.distractor_every, rng)
-                    run_round_schedule(case, model, arm, args.distractors, round_schedule,
-                                        log_fh, rng, composite_repeat, result["messages"])
+                    if result["line_b_ready"]:
+                        composite_repeat = f"d{distance}_{start_qid}_{repeat_idx}"
+                        round_schedule = build_round_schedule(
+                            available_distances(case), args.rounds, args.distractor_every, rng)
+                        run_round_schedule(case, model, arm, args.distractors, round_schedule,
+                                            log_fh, rng, composite_repeat, result["messages"])
+                    else:
+                        print(f"[warn] {case_id}/{model}/{arm} 這趟 hit 了但 Line B 轉場失敗，"
+                              f"沒有追問資料（探索本身的 hit/miss 統計仍然有效）")
 
                 _write_explore_checkpoint(log_fh, case_id, model, arm, distance, start_qid, repeat_idx)
 
@@ -292,6 +396,10 @@ def main():
     parser.add_argument("--distractor-every", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cache-path", type=str, default="tkg_cache.db")
+    parser.add_argument("--offline", action="store_true",
+                         help="只用本地快取（build_tkg_snapshot.py 先建好），快取沒有的節點"
+                              "直接報錯、不會悄悄即時打 Wikidata API。跑正式實驗前建議先開這個，"
+                              "確保整組模型看到的是同一份固定快照，不受 Wikidata 中途被編輯影響")
     parser.add_argument("--restrict-subgraph-k", type=int, default=0,
                          help="0 表示關閉（預設，完全自由探索）。>0 時只把 pivot 的 k-hop "
                               "鄰域開放給模型探索，會人為墊高自然命中率，報告裡要誠實交代")
@@ -306,7 +414,9 @@ def main():
         import run_experiment
         cases, backend, walker_factory = build_dryrun_fixtures()
         args.distractors = ["mock distractor question 1?", "mock distractor question 2?"]
-        run_experiment.call_model = make_plain_mock_call_model()  # Line B 的純文字問答也要 mock 掉
+        plain_mock = make_plain_mock_call_model()
+        run_experiment.call_model = plain_mock  # PK 探針/Line B 的純文字問答也要 mock 掉
+        plain_call_model_fn = plain_mock
     else:
         with open(args.cases, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -318,8 +428,9 @@ def main():
         if not os.environ.get("OPENROUTER_API_KEY"):
             print("[error] 請先在 .env 或環境變數設定 OPENROUTER_API_KEY", file=sys.stderr)
             sys.exit(1)
-        backend = WikidataGraphBackend(cache_path=args.cache_path)
+        backend = WikidataGraphBackend(cache_path=args.cache_path, offline_only=args.offline)
         walker_factory = None
+        plain_call_model_fn = call_model
 
     completed = load_completed_explorations(args.output)
     if completed:
@@ -333,7 +444,7 @@ def main():
             for case in cases:
                 rng = random.Random(args.seed + hash(case["id"]) % 997 + hash(model) % 991)
                 run_case_model(case, model, backend, args, log_fh, completed, rng, hit_counts,
-                                walker_factory=walker_factory)
+                                walker_factory=walker_factory, plain_call_model_fn=plain_call_model_fn)
 
     write_hit_rate_csv(args.hit_rate_output, hit_counts)
     print(f"完成，結果寫入 {args.output}")

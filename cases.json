@@ -248,17 +248,9 @@
         {"node": "股票代號", "as_of": null, "facts": ["Apple 在 NASDAQ 掛牌，代號 AAPL"], "neighbors": ["產品線"]},
         {"node": "產品線", "as_of": null, "facts": ["主要產品線包含 iPhone、Mac、iPad"], "neighbors": ["成立年份"]}
       ],
+      "_distance1_note": "『John Ternus 卸任前職位』這個候選（原本是 distance-1 的第一個候選）已經拿掉了：他在 Wikidata 上對應的項目 Q106028933 是最近才建的、還沒有人補上英文 label，wikidata_graph_backend.py 的 _fetch_labels() 只好退而求其次用 description 當顯示名稱（不然模型看到的會是一串看起來像亂碼的 QID，等於完全沒曝光到新 CEO 是誰），但這個 description 剛好就是「Apple senior vice president of hardware engineering」——直接把這個候選的答案透過 pivot 節點自己的 facts 洩漏出去了，check_pivot_leak() 已經驗證會抓到。只留 Laura Legros 那個候選（不受這個問題影響），沒有硬留兩個候選然後假裝沒事。",
       "ripples": {
         "1": [
-          {
-            "question": "What was John Ternus's role at Apple before becoming CEO?",
-            "paraphrases": [
-              "Before being named CEO, what position did John Ternus hold at Apple?",
-              "What job title did John Ternus have at Apple prior to his promotion to CEO?"
-            ],
-            "old_keywords": ["unknown", "no information", "not aware"],
-            "new_keywords": ["hardware engineering", "senior vice president"]
-          },
           {
             "question": "Which retired Apple executive did John Ternus rehire as he took over as CEO?",
             "paraphrases": [

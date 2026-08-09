@@ -9,12 +9,17 @@ test_free_exploration_dryrun.py
   3. 環狀圖不會無窮迴圈
   4. hit/miss 判斷正確，且 miss 的軌跡不會被送進 Line B 排程
   5. 洩漏檢查只檢查 pivot 節點自己的 facts，不會誤判模型探索到的下游節點
+  6. branch_cap 真的會限制熱門節點展開下一層的鄰居數（見 build_tkg_snapshot.py
+     為什麼需要這個：沒有上限的話國家/大型組織這種節點會組合爆炸）
+  7. offline_only=True 時，快取沒有的 qid 會直接報錯，不會悄悄打真的 API
 
 執行：
     python3 test_free_exploration_dryrun.py
 """
 
+import json
 import os
+import sqlite3
 
 from mock_graph_fixtures import MockGraphBackend, build_mock_graph, build_cyclic_graph, build_mock_case, PIVOT_QID
 from graph_exploration_agent import run_free_exploration
@@ -200,6 +205,65 @@ def test_leak_check_only_pivot_node():
     print("[OK] test_leak_check_only_pivot_node")
 
 
+# ---------- 6. branch_cap 限制熱門節點的展開數 ----------
+
+def test_branch_cap_limits_fanout():
+    from wikidata_graph_backend import bfs_frontier
+
+    graph = {"HUB": {"qid": "HUB", "label": "hub", "facts": [],
+                       "neighbors": [{"qid": f"N{i}", "label": f"N{i}", "property": "rel"}
+                                      for i in range(10)]}}
+    for i in range(10):
+        graph[f"N{i}"] = {"qid": f"N{i}", "label": f"N{i}", "facts": [],
+                            "neighbors": [{"qid": f"N{i}_leaf", "label": "leaf", "property": "rel"}]}
+        graph[f"N{i}_leaf"] = {"qid": f"N{i}_leaf", "label": "leaf", "facts": [], "neighbors": []}
+
+    backend = MockGraphBackend(graph)
+
+    capped = bfs_frontier(backend.fetch_node, "HUB", max_depth=2, branch_cap=3)
+    assert len(capped[1]) == 3, f"distance-1 應該只展開 branch_cap=3 個節點，實際 {len(capped[1])}"
+    assert len(capped[2]) <= 3, "distance-2 只能來自那 3 個被展開的 distance-1 節點"
+
+    uncapped = bfs_frontier(backend.fetch_node, "HUB", max_depth=1, branch_cap=0)
+    assert len(uncapped[1]) == 10, f"branch_cap=0（不設上限）應該走訪全部 10 個鄰居，實際 {len(uncapped[1])}"
+    print("[OK] test_branch_cap_limits_fanout")
+
+
+# ---------- 7. offline_only 擋下快取沒有的 qid ----------
+
+def test_offline_only_blocks_uncached_qid():
+    from wikidata_graph_backend import WikidataGraphBackend, WikidataError
+
+    cache_path = "test_offline_cache_tmp.db"
+    if os.path.exists(cache_path):
+        os.remove(cache_path)
+
+    # 直接寫一筆假資料進快取，繞過真的 API（測的是 offline_only 的攔截邏輯，
+    # 不是真的網路行為）
+    conn = sqlite3.connect(cache_path)
+    conn.execute("CREATE TABLE IF NOT EXISTS node_cache "
+                 "(qid TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at TEXT NOT NULL)")
+    fake_record = {"qid": "Q_FAKE", "label": "Fake", "records": []}
+    conn.execute("INSERT INTO node_cache (qid, data, fetched_at) VALUES (?, ?, ?)",
+                 ("Q_FAKE", json.dumps(fake_record), "2026-01-01T00:00:00"))
+    conn.commit()
+    conn.close()
+
+    backend = WikidataGraphBackend(cache_path=cache_path, offline_only=True)
+    node = backend.fetch_node("Q_FAKE")  # 快取裡有，應該正常回傳，不用打 API
+    assert node["qid"] == "Q_FAKE"
+
+    try:
+        backend.fetch_node("Q_NOT_CACHED")
+        raise AssertionError("應該要 raise WikidataError，不該正常回傳")
+    except WikidataError as e:
+        assert "offline_only" in str(e), f"錯誤訊息應該講清楚是 offline_only 擋下來的，實際: {e}"
+
+    backend.close()
+    os.remove(cache_path)
+    print("[OK] test_offline_only_blocks_uncached_qid")
+
+
 if __name__ == "__main__":
     test_bfs_distance_correct()
     test_termination_stop_exploring()
@@ -209,4 +273,6 @@ if __name__ == "__main__":
     test_hit_detection()
     test_miss_detection_and_not_sent_to_line_b()
     test_leak_check_only_pivot_node()
+    test_branch_cap_limits_fanout()
+    test_offline_only_blocks_uncached_qid()
     print("\n[OK] 全部通過。")

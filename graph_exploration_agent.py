@@ -149,6 +149,7 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
             except json.JSONDecodeError:
                 args = {}
 
+            origin_qid = current_qid
             node = backend.fetch_node(current_qid)
 
             if name == "list_neighbors":
@@ -164,7 +165,15 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
                     current_qid = neighbor_id
                     visited.add(neighbor_id)
                     visited_path.append(neighbor_id)
-                    result = f"已移動到 {neighbor_id}。"
+                    # 移動的同時直接把目的地節點的 facts 帶出來，模擬真的點連結進到
+                    # 一個頁面會直接看到頁面內容（不用再點一次「查看」）。踩過的坑：
+                    # 原本 move_to 只回「已移動到 X」，不會自動帶出 facts，導致模型
+                    # 走到 pivot 節點卻從來沒有實際「看到」pivot fact 本身就被判定
+                    # hit、直接進 Line B——測到的其實是「模型根本沒被曝光」，不是先驗
+                    # 反悔。真的曝光需要模型親眼看過內容，不是單純路徑上經過而已。
+                    dest_node = backend.fetch_node(neighbor_id)
+                    result = (f"已移動到「{dest_node['label']}」（{neighbor_id}）。目前已知：\n"
+                              f"{_format_facts(dest_node['facts'])}")
                     if target_qid is not None and neighbor_id == target_qid:
                         reached_pivot_this_step = True
             elif name == "stop_exploring":
@@ -173,7 +182,7 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
             else:
                 result = f"錯誤：未知的工具 {name}。"
 
-            trajectory.append({"step": step, "from_qid": current_qid, "action": name,
+            trajectory.append({"step": step, "from_qid": origin_qid, "action": name,
                                 "args": args, "free_text": free_text, "result": result})
             messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": result})
 

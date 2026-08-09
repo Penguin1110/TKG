@@ -263,6 +263,50 @@ diff（例如 head of government 換人），再從那個「當下」的事實�
 節點的內容裡，恰好撞上某個 ripple 事實的答案。改成 `current_only=True`
 之後直接解決了。
 
+## 本地 TKG 快照：`build_tkg_snapshot.py`
+
+正式跑實驗前，建議先把會用到的圖區域抓下來存成本地快照，理由有兩個：
+
+1. **可重現**：Wikidata 隨時有人在編輯，如果每個模型都各自即時打 API 探索，
+   不同模型實際上可能看到不一樣版本的圖（例如模型 A 探索的當下某個 claim
+   還沒被編輯，模型 B 探索時已經被改了）。先建好快照、固定住，才能說「這次
+   pilot 裡所有模型面對的是同一份圖」。
+2. **離線、不受即時 API 狀況影響**：探索是多輪 tool-calling，一個案例走幾十步
+   很正常，中途因為 Wikidata 那邊速率限制或連線問題失敗會很煩人。
+
+```bash
+# 建快照：種子 = cases.json 裡所有 pivot_qid + control_pivot_candidates，
+# 每個種子往外展開到 distance 3（對應 ripple distance 1-3 的需求）
+uv run python build_tkg_snapshot.py --max-depth 3 --branch-cap 25
+
+# 之後正式跑實驗時加 --offline，只用快照、快取沒有的節點直接報錯
+uv run python run_free_exploration_batch.py --models "..." --offline
+uv run python run_control_exploration_batch.py --models "..." --offline --control-pivot-qid Q2283
+```
+
+**`--branch-cap`（預設 25）是必要的正確性防護，不是效能微調**：像 `peru_president`
+的 pivot（Q419，Peru）這種國家實體，過濾掉歷史 claim 之後仍然有 266 個
+current 鄰居——沒有上限的話，distance=3 的 BFS 光是展開 distance=2 那一層
+就要對每個 distance=1 節點各打上百次 API，會直接變成幾千次請求。實測抓一個
+種子的 distance=2（`branch_cap=25`、`max_results=50`）花了超過 5 分鐘（含幾次
+Wikidata 429 限流的重試退避）——這是即時查詢完全不可行的規模，也是為什麼
+要先建快照、之後探索才能用快照的原因。設了 `branch_cap` 之後找到的候選起點
+池是「圖上一部分」而不是「全部」，這點會直接反映在 `find_nodes_at_distance()`
+回傳的候選數量上，寫報告時如實交代取樣範圍即可，不影響 pilot 本身的正確性。
+
+**快照不會自動保鮮**：建好之後 Wikidata 還是持續在被編輯，快照跟「現在的
+Wikidata」的落差只會越來越大。用 `--verify` 檢查種子節點（`pivot_qid`，
+不含衍生鄰居）現在有沒有變動：
+
+```bash
+uv run python build_tkg_snapshot.py --verify
+```
+
+會對 manifest 裡的每個種子重新即時查一次、跟快照裡的版本比對，印出有沒有
+差異——**不會自動幫你決定「差異不大所以沒關係」**，多大算「不大」是研究
+判斷（例如 pivot 本身的 claim 變了 vs 只是某個不相關的旁支 claim 變了，
+嚴重程度不一樣），工具只負責把差異攤開來，判斷交給人。
+
 ## 目前的資料現況（真實 Wikidata 查證結果，2026-08 查證）
 
 7 個案例，`pivot_qid` 查證結果分兩類：

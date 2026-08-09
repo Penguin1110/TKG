@@ -29,3 +29,34 @@ summary_v2_*.csv
 summary_v3_*.csv
 summary_conflict_vs_control_v2_*.csv
 summary_conflict_vs_control_v3_*.csv
+
+# same convention for 選項 B (results_free_exploration.jsonl / hit_rate_by_distance.csv
+# with no suffix are the current canonical output — this is the first run, before the
+# Line B transition + PK probe fixes, so conflict-arm ripple answers are all bogus
+# ("other" — the model was stuck asking to re-use exploration tools that no longer
+# existed) and there's no PK-probe kill-gate data at all
+results_free_exploration_v1_*.jsonl
+hit_rate_by_distance_v1_*.csv
+# v2: transition prompt fixed the "let me use a tool" confusion, but its wording
+# ("根據你目前已知的資訊") got misread as "graph-observed facts only", so the
+# model refused to answer using its own general knowledge — still bogus data
+results_free_exploration_v2_*.jsonl
+hit_rate_by_distance_v2_*.csv
+# v3: n=1 sanity check after the general-knowledge fix, happened to miss (model
+# didn't move) — just variance, not a bug, but not enough data to be useful either
+results_free_exploration_v3_*.jsonl
+hit_rate_by_distance_v3_*.csv
+# v4: general-knowledge fix worked, but discovered "hit" (move_to reached pivot_qid)
+# didn't mean the model ever actually viewed the pivot's facts — move_to only
+# confirmed movement, exposure never happened. Fixed: move_to now auto-reveals the
+# destination's facts (like clicking a real wiki link shows the page content)
+results_free_exploration_v4_*.jsonl
+hit_rate_by_distance_v4_*.csv
+# v5: exposure now real, but Apple Inc.'s 1160-fact node meant the CEO claim was
+# truncated out of the top-30 shown facts entirely — fixed by prioritizing
+# time-qualified (dynamic) claims over static ones when rendering. Also found the
+# missing-label fallback (for John Ternus's unlabeled Wikidata stub) leaked the
+# distance-1 "prior role" ripple answer via its description text — fixed by
+# dropping that one ripple candidate from apple_ceo (see cases.json _distance1_note)
+results_free_exploration_v5_*.jsonl
+hit_rate_by_distance_v5_*.csv

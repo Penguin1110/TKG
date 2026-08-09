@@ -1,0 +1,7 @@
+model,arm,distance,occurrence,accuracy_pct,ci_low,ci_high,n
+openai/gpt-4.1-mini,conflict,1,1,0.0,0.0,0.0,6
+openai/gpt-4.1-mini,conflict,1,2,0.0,0.0,0.0,3
+openai/gpt-4.1-mini,conflict,2,1,33.3,0.0,66.7,6
+openai/gpt-4.1-mini,conflict,2,2,50.0,0.0,100.0,2
+openai/gpt-4.1-mini,conflict,3,1,0.0,0.0,0.0,6
+openai/gpt-4.1-mini,conflict,3,2,0.0,0.0,0.0,1

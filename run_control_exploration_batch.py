@@ -37,6 +37,7 @@ import sys
 from collections import defaultdict
 
 from fetch_wikidata_pivots import find_stable_control_pivot, get_wikipedia_title, fetch_pageviews
+from openrouter_client import call_model
 from run_free_exploration_batch import (
     load_completed_explorations, run_case_model, write_hit_rate_csv,
     build_dryrun_fixtures, make_plain_mock_call_model,
@@ -90,6 +91,10 @@ def main():
     parser.add_argument("--distractor-every", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cache-path", type=str, default="tkg_cache.db")
+    parser.add_argument("--offline", action="store_true",
+                         help="圖探索只用本地快取，快取沒有的節點直接報錯（見 build_tkg_snapshot.py）。"
+                              "注意：--control-pivot-qid 沒指定時的自動篩選（pageviews 比對）不算在"
+                              "圖探索快取範圍內，仍然需要連線；要完全離線請搭配 --control-pivot-qid")
     parser.add_argument("--restrict-subgraph-k", type=int, default=0)
     parser.add_argument("--control-pivot-qid", type=str, default=None,
                          help="直接指定某個 case 的 control pivot（單一 case 用；多 case 批次跑時"
@@ -111,7 +116,9 @@ def main():
         import run_experiment
         cases, backend, walker_factory = build_dryrun_fixtures()
         args.distractors = ["mock distractor question 1?", "mock distractor question 2?"]
-        run_experiment.call_model = make_plain_mock_call_model()
+        plain_mock = make_plain_mock_call_model()
+        run_experiment.call_model = plain_mock
+        plain_call_model_fn = plain_mock
         # dry-run 的 mock case 直接把 pivot_qid 借來當 control pivot 用（mock 圖本來
         # 就不區分 conflict/control 語意，重點是驗證機制，不是驗證 pageviews 篩選邏輯）
         for c in cases:
@@ -127,8 +134,9 @@ def main():
         if not os.environ.get("OPENROUTER_API_KEY"):
             print("[error] 請先在 .env 或環境變數設定 OPENROUTER_API_KEY", file=sys.stderr)
             sys.exit(1)
-        backend = WikidataGraphBackend(cache_path=args.cache_path)
+        backend = WikidataGraphBackend(cache_path=args.cache_path, offline_only=args.offline)
         walker_factory = None
+        plain_call_model_fn = call_model
 
     completed = load_completed_explorations(args.output)
     if completed:
@@ -159,7 +167,8 @@ def main():
                 rng = random.Random(args.seed + hash(case["id"]) % 997 + hash(model) % 991)
                 run_case_model(case, model, backend, args, log_fh, completed, rng, hit_counts,
                                 arm="control", pivot_qid=control_pivot_qid,
-                                walker_factory=walker_factory, skip_leak_check=True)
+                                walker_factory=walker_factory, skip_leak_check=True,
+                                plain_call_model_fn=plain_call_model_fn)
 
     write_hit_rate_csv(args.hit_rate_output, hit_counts)
     print(f"完成，結果寫入 {args.output}")

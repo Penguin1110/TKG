@@ -51,10 +51,18 @@ class WikidataError(Exception):
 class WikidataGraphBackend:
     def __init__(self, cache_path: str = "tkg_cache.db",
                  user_agent: str = DEFAULT_USER_AGENT, lang: str = "en",
-                 current_only: bool = True):
+                 current_only: bool = True, offline_only: bool = False):
+        """
+        offline_only=True 時，只要 fetch_node() 遇到本地快取沒有的 qid 就直接
+        報錯，不會悄悄地即時打 Wikidata API。用來在跑正式實驗前先用
+        build_tkg_snapshot.py 把需要的節點都快取好，之後探索過程完全離線、
+        不會受即時 API 的速率限制或連線問題影響，也不會因為模型走到快照沒
+        涵蓋的節點而在跑到一半時默默改變資料來源（快照 vs 即時）。
+        """
         self.user_agent = user_agent
         self.lang = lang
         self.current_only = current_only
+        self.offline_only = offline_only
         self._last_request_time = 0.0
         self._conn = sqlite3.connect(cache_path)
         self._conn.execute(
@@ -68,31 +76,66 @@ class WikidataGraphBackend:
 
     # ---------- 底層：帶速率限制、User-Agent 的請求 ----------
 
-    def _rate_limited_get(self, params: dict) -> dict:
-        elapsed = time.time() - self._last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
-        try:
-            resp = requests.get(WIKIDATA_API, params=params,
-                                 headers={"User-Agent": self.user_agent}, timeout=30)
-            resp.raise_for_status()
-            return resp.json()
-        finally:
-            self._last_request_time = time.time()
+    def _rate_limited_get(self, params: dict, max_retries: int = 5) -> dict:
+        """
+        帶速率限制 + 重試的 GET。實測發現固定 1 秒間隔不代表不會被 Wikidata 節流
+        （連續查證階段有踩過 429），這裡才補上重試+指數退避——建 snapshot 時會
+        連續打幾百次請求，沒有重試邏輯遇到一次 429 整個流程就中斷太脆弱了。
+        """
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            elapsed = time.time() - self._last_request_time
+            if elapsed < MIN_REQUEST_INTERVAL:
+                time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+            try:
+                resp = requests.get(WIKIDATA_API, params=params,
+                                     headers={"User-Agent": self.user_agent}, timeout=30)
+                self._last_request_time = time.time()
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    last_err = requests.exceptions.HTTPError(
+                        f"{resp.status_code} for {resp.url}", response=resp)
+                    wait = 2 ** attempt
+                    print(f"[warn] Wikidata API 第 {attempt} 次失敗（HTTP {resp.status_code}），"
+                          f"{wait}s 後重試...")
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.RequestException as e:
+                self._last_request_time = time.time()
+                last_err = e
+                wait = 2 ** attempt
+                print(f"[warn] Wikidata API 第 {attempt} 次失敗（{e}），{wait}s 後重試...")
+                time.sleep(wait)
+        raise WikidataError(f"打 Wikidata API 失敗，已重試 {max_retries} 次：{last_err}")
 
     def _fetch_labels(self, ids: list) -> dict:
-        """回傳 {id: label}，查不到 label 的就用 id 本身當 fallback。"""
+        """
+        回傳 {id: label}。查不到 label 時，先退而求其次用 description 當 fallback
+        （踩過的坑：apple_ceo 這個案例裡，John Ternus 對應的 Wikidata 項目
+        Q106028933 是最近才建的、還沒有人補上英文 label，只有 description
+        "Apple senior vice president of hardware engineering"——如果直接顯示
+        原始 QID，模型看到的 pivot fact 會是「chief executive officer:
+        Q106028933」，等於完全沒曝光到新 CEO 是誰。description 雖然不是真正
+        的人名，但至少比一串看起來像亂碼的 QID 有意義，且這是 Wikidata 資料
+        本身的缺口，不是我們能補的，description fallback 是務實的次佳選擇），
+        description 也沒有才真的用 id 本身當最後手段。
+        """
         labels = {}
         ids = sorted(set(ids))
         for i in range(0, len(ids), LABEL_BATCH_SIZE):
             chunk = ids[i:i + LABEL_BATCH_SIZE]
             data = self._rate_limited_get({
                 "action": "wbgetentities", "ids": "|".join(chunk),
-                "format": "json", "languages": self.lang, "props": "labels",
+                "format": "json", "languages": self.lang, "props": "labels|descriptions",
             })
             for eid, entity in data.get("entities", {}).items():
                 label_obj = entity.get("labels", {}).get(self.lang)
-                labels[eid] = label_obj["value"] if label_obj else eid
+                if label_obj:
+                    labels[eid] = label_obj["value"]
+                    continue
+                desc_obj = entity.get("descriptions", {}).get(self.lang)
+                labels[eid] = f"{eid}（{desc_obj['value']}）" if desc_obj else eid
         return labels
 
     # ---------- 核心：抓一個節點 ----------
@@ -112,6 +155,33 @@ class WikidataGraphBackend:
         claim_records = self._fetch_claim_records(qid)
         return self._render_node(qid, claim_records, current_only=self.current_only)
 
+    def refresh_node(self, qid: str) -> dict:
+        """
+        強制即時重打 API 重抓一個 qid（不管快取有沒有），拿新資料跟快取裡
+        原本的比對，回傳有沒有變動，並把快取更新成新資料。給
+        build_tkg_snapshot.py 的 --verify 模式用：快照建好之後，Wikidata
+        本身還是持續在被編輯，這個方法可以回答「快照裡的 pivot 現在還準嗎」。
+
+        回傳：{"qid", "had_cache"（快照裡原本有沒有這個節點）,
+               "changed"（新舊 claim 記錄是否不同）,
+               "old_record_count", "new_record_count"}
+        """
+        old_row = self._conn.execute(
+            "SELECT data FROM node_cache WHERE qid=?", (qid,)
+        ).fetchone()
+        old = json.loads(old_row[0]) if old_row else None
+
+        self._conn.execute("DELETE FROM node_cache WHERE qid=?", (qid,))
+        self._conn.commit()
+        new = self._fetch_claim_records(qid)  # 快取已刪，這裡一定會真的打 API
+
+        changed = old is None or old.get("records") != new.get("records")
+        return {
+            "qid": qid, "had_cache": old is not None, "changed": changed,
+            "old_record_count": len(old["records"]) if old else 0,
+            "new_record_count": len(new["records"]),
+        }
+
     def _fetch_claim_records(self, qid: str) -> dict:
         """
         抓一個 QID 的完整、未過濾 claim 記錄（含每條 claim 是不是「現在仍然
@@ -124,6 +194,13 @@ class WikidataGraphBackend:
         ).fetchone()
         if cached:
             return json.loads(cached[0])
+
+        if self.offline_only:
+            raise WikidataError(
+                f"offline_only=True，但快取裡沒有 {qid}。這代表探索走到了 snapshot "
+                f"沒有涵蓋的節點——先用 build_tkg_snapshot.py 把需要的範圍（種子節點 + "
+                f"更大的 --max-depth/--branch-cap）重新建過，或這次先不要用 offline_only。"
+            )
 
         data = self._rate_limited_get({
             "action": "wbgetentities", "ids": qid, "format": "json",
@@ -179,12 +256,30 @@ class WikidataGraphBackend:
 
     @staticmethod
     def _render_node(qid: str, claim_records: dict, current_only: bool) -> dict:
-        """把快取裡完整、未過濾的 claim 記錄，依 current_only 篩選後組成
-        fetch_node() 對外回傳的 {"qid","label","facts","neighbors"} 格式。"""
+        """
+        把快取裡完整、未過濾的 claim 記錄，依 current_only 篩選後組成
+        fetch_node() 對外回傳的 {"qid","label","facts","neighbors"} 格式。
+
+        踩過的坑：熱門節點（例如 Apple Inc.）就算做完 current_only 過濾，
+        剩下的 claims 還是可能上千條（一堆 EIN、Legal Entity Identifier 之類
+        永遠不會有 end time 的靜態識別碼，加上創辦人這種同樣永遠是「現在」的
+        claim）。graph_exploration_agent.py 的 view_current_node()/move_to()
+        只會顯示前 MAX_FACTS_SHOWN=30 條（token 預算限制），如果照原始 claims
+        順序排，CEO 這種真正動態、我們在乎的 claim 完全可能被埋在一千多條
+        靜態識別碼後面、連前 30 條都排不到——等於曝光步驟看起來有跑，模型卻
+        根本沒機會看到 pivot fact 本身。
+
+        修法：帶時間 qualifier 的 claim（`time_suffix` 非空，代表這是會隨時間
+        變動的動態事實，例如「誰現在是 CEO」）優先排在前面，沒有時間資訊的
+        靜態事實（識別碼、常態性描述）排後面——用穩定排序，同一組內原本的
+        相對順序不變。這剛好也符合 TKG 的核心關注點：動態、有時間性的事實
+        本來就該比靜態識別碼優先被看到。
+        """
+        current_records = [r for r in claim_records["records"] if not current_only or r["is_current"]]
+        ordered_records = sorted(current_records, key=lambda r: 0 if r["time_suffix"] else 1)
+
         facts, neighbors = [], []
-        for rec in claim_records["records"]:
-            if current_only and not rec["is_current"]:
-                continue
+        for rec in ordered_records:
             facts.append(f"{rec['prop_label']}: {rec['value_label']}{rec['time_suffix']}")
             if rec["is_item"]:
                 neighbors.append({"qid": rec["value_qid"],
@@ -197,15 +292,23 @@ class WikidataGraphBackend:
     # fetch_node(qid) 這個介面）驗證同一套 BFS 邏輯，而不是另外重寫一份不同的
     # 演算法去測──那樣測到的就不是真正在跑的程式碼了。
 
-    def bfs_distance(self, start_qid: str, target_qid: str, max_depth: int = 5):
-        return bfs_distance(self.fetch_node, start_qid, target_qid, max_depth)
+    def bfs_distance(self, start_qid: str, target_qid: str, max_depth: int = 5,
+                      branch_cap: int = None):
+        return bfs_distance(self.fetch_node, start_qid, target_qid, max_depth, branch_cap)
 
     def find_nodes_at_distance(self, start_qid: str, distance: int,
-                                max_depth: int = None, max_results: int = 50) -> list:
-        return find_nodes_at_distance(self.fetch_node, start_qid, distance, max_depth, max_results)
+                                max_depth: int = None, max_results: int = 50,
+                                branch_cap: int = None) -> list:
+        return find_nodes_at_distance(self.fetch_node, start_qid, distance, max_depth,
+                                       max_results, branch_cap)
 
 
-def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str = None) -> dict:
+DEFAULT_BRANCH_CAP = 25  # 見 bfs_frontier() 的說明：沒有這個上限，熱門節點（國家/大型組織）
+                          # 光是展開一層鄰居就可能是幾百個，兩三層下去會組合爆炸
+
+
+def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str = None,
+                  branch_cap: int = None) -> dict:
     """
     從 start_qid 做 BFS，回傳 {distance: [qid,...]}（distance 0 = start_qid 自己）。
     如果有給 target_qid，一找到就提早結束（省 API 呼叫／減少 mock 圖裡的重複走訪）。
@@ -213,7 +316,19 @@ def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str 
     fetch_node_fn 只要是「輸入 qid、回傳 {"neighbors": [{"qid":...}, ...]}」的
     callable 就行，真正的 WikidataGraphBackend.fetch_node 或測試用的
     MockGraphBackend.fetch_node 都適用。
+
+    branch_cap：每個節點展開下一層時最多只走前 N 個鄰居（預設
+    DEFAULT_BRANCH_CAP=25，傳 None 也是用這個預設值，傳 0 或負數才是真的不設上限）。
+    這不是效能微調，是必要的正確性防護——像秘魯這種國家實體，light 節點的鄰居數
+    可以到兩三百個，沒有上限的話，distance=3 的 BFS 光是展開 distance=2 那一層
+    可能就要對每個 distance=1 節點都各打上百次 API，實測會直接變成幾千次請求、
+    以現在 1 秒一次的 rate limit 來算要跑好幾個小時。設了上限之後找到的候選起點
+    池會是「圖上一部分」而不是「全部」，但這本來就跟 --n-starts-per-distance
+    只抽樣一部分起點的精神一致，不影響 pilot 的正確性，只是需要在報告裡如實
+    交代取樣範圍有這層限制（跟 --restrict-subgraph-k 是同一類型的、需要誠實
+    交代的工程取捨，但這裡是預設就開啟，因為完全不設上限在實務上根本跑不完）。
     """
+    cap = DEFAULT_BRANCH_CAP if branch_cap is None else branch_cap
     frontier_by_distance = {0: [start_qid]}
     visited = {start_qid}
     current_level = [start_qid]
@@ -224,7 +339,8 @@ def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str 
                 node = fetch_node_fn(qid)
             except WikidataError:
                 continue
-            for nb in node["neighbors"]:
+            neighbors = node["neighbors"] if cap <= 0 else node["neighbors"][:cap]
+            for nb in neighbors:
                 nb_qid = nb["qid"]
                 if nb_qid in visited:
                     continue
@@ -240,11 +356,13 @@ def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str 
     return frontier_by_distance
 
 
-def bfs_distance(fetch_node_fn, start_qid: str, target_qid: str, max_depth: int = 5):
+def bfs_distance(fetch_node_fn, start_qid: str, target_qid: str, max_depth: int = 5,
+                  branch_cap: int = None):
     """回傳 start_qid 到 target_qid 的最短跳數，超過 max_depth 找不到就回傳 None。"""
     if start_qid == target_qid:
         return 0
-    frontier = bfs_frontier(fetch_node_fn, start_qid, max_depth, target_qid=target_qid)
+    frontier = bfs_frontier(fetch_node_fn, start_qid, max_depth, target_qid=target_qid,
+                             branch_cap=branch_cap)
     for depth, qids in frontier.items():
         if depth > 0 and target_qid in qids:
             return depth
@@ -252,9 +370,10 @@ def bfs_distance(fetch_node_fn, start_qid: str, target_qid: str, max_depth: int 
 
 
 def find_nodes_at_distance(fetch_node_fn, start_qid: str, distance: int,
-                            max_depth: int = None, max_results: int = 50) -> list:
+                            max_depth: int = None, max_results: int = 50,
+                            branch_cap: int = None) -> list:
     """回傳距離 start_qid 剛好 `distance` 跳的候選節點 qid 清單（做為起點池）。"""
-    frontier = bfs_frontier(fetch_node_fn, start_qid, max_depth or distance)
+    frontier = bfs_frontier(fetch_node_fn, start_qid, max_depth or distance, branch_cap=branch_cap)
     return frontier.get(distance, [])[:max_results]
 
 
