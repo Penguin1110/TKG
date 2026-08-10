@@ -1,5 +1,5 @@
 {
-  "_schema_notes": "ripples/control 都以「距離」為 key（\"1\"/\"2\"/\"3\"），每個距離下是候選事實的 list。distance 1/2/3 目前都用 WebSearch 查證過真實新聞/官方來源才填入（新聞連結見對話記錄，沒有編造任何事實）；bestbuy_ceo 的 distance 3（Jason Bonfig 空出的 Chief Customer, Product and Fulfillment Officer 一職由誰接任）截至查證當下官方還沒公布繼任者，所以刻意留空陣列，而不是編造答案。design doc 建議每距離備 2-3 個候選，目前多數距離仍只有 1 個，擴充時比照現有格式新增元素即可。round schedule 只會抽「非空」的距離，因此留空陣列可以安全先跑 pilot。7 個案例涵蓋政治(3)/企業(2)/金融(1)/體育(1)，fed_chair 跟 manutd_coach 是後來補的，graph_walk 從一開始寫就沒有洩漏 ripple 答案（吸取了前面版本的教訓，寫資料時已用關鍵字掃描驗證過）。graph_walk（conflict arm）/control_graph_walk（control arm）是 Line A + Line B 合併版的曝光機制：劇本式的 5 步節點瀏覽（不用 OpenRouter tool-calling，純文字模擬），每一步的 facts 都跟同一個 case 的 ripples/control 事實對應，帶 as_of 時間戳；模型在每一步的自由文字回覆會被記錄，但不影響下一步顯示哪個節點（刻意排除「模型導航能力」這個干擾變數，只保留「曝光後會不會反悔」這個變數）。exposure_snippet 欄位保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
+  "_schema_notes": "ripples/control 都以「距離」為 key（\"1\"/\"2\"/\"3\"），每個距離下是候選事實的 list。distance 1/2/3 目前都用 WebSearch 查證過真實新聞/官方來源才填入（新聞連結見對話記錄，沒有編造任何事實）；bestbuy_ceo 的 distance 3（Jason Bonfig 空出的 Chief Customer, Product and Fulfillment Officer 一職由誰接任）截至查證當下官方還沒公布繼任者，所以刻意留空陣列，而不是編造答案。design doc 建議每距離備 2-3 個候選，目前多數距離仍只有 1 個，擴充時比照現有格式新增元素即可。round schedule 只會抽「非空」的距離，因此留空陣列可以安全先跑 pilot。11 個案例涵蓋政治(4)/企業(3)/金融(1)/體育(3)，fed_chair、manutd_coach、france_coach、uk_pm、realmadrid_coach、disney_ceo 是後來補的，graph_walk 從一開始寫就沒有洩漏 ripple 答案（吸取了前面版本的教訓，寫資料時已用關鍵字掃描驗證過）。graph_walk（conflict arm）/control_graph_walk（control arm）是 Line A + Line B 合併版的曝光機制：劇本式的 5 步節點瀏覽（不用 OpenRouter tool-calling，純文字模擬），每一步的 facts 都跟同一個 case 的 ripples/control 事實對應，帶 as_of 時間戳；模型在每一步的自由文字回覆會被記錄，但不影響下一步顯示哪個節點（刻意排除「模型導航能力」這個干擾變數，只保留「曝光後會不會反悔」這個變數）。exposure_snippet 欄位保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
   "distractor_questions": [
     "What is the chemical symbol for gold?",
     "What is the capital of Japan?",
@@ -14,7 +14,8 @@
     {
       "id": "portugal_first_lady",
       "category": "politics",
-      "_pivot_qid_note": "沒有標 pivot_qid，選項B（自由探索）目前跑不了這個 case。查證過 Wikidata 上『First Lady of Portugal』有一個位置實體（Q18464230，instance of: position），但它本身沒有可查詢的 officeholder/current-holder claim（不像 Apple/Man Utd/Fed/Peru 那樣，組織或國家實體上直接有帶時間戳的職位持有人清單）——First Lady 在葡萄牙不是正式憲政職位（案例本身的曝光內容也提到這點），Wikidata 沒有用同一套『組織持有職位』的建模方式記錄它，這是真實資料結構的限制，不是查證不夠仔細。",
+      "pivot_qid": "Q1580316",
+      "_pivot_qid_note": "António José Seguro（總統本人，不是 First Lady 的職位實體）。查證過『First Lady of Portugal』的職位實體本身（Q18464230，instance of: position）沒有可查詢的 officeholder/current-holder claim——First Lady 在葡萄牙不是正式憲政職位，Wikidata 沒有用『組織持有職位』的方式建模它。改用 Seguro 自己的條目繞過這個限制：Q1580316 有一條乾淨的 'spouse: Margarida Maldonado Freitas' claim（雖然沒有 P580/P582 時間戳，但也沒有結束時間，過 current_only 篩選會保留），跟本案 new_answer_keywords 完全對上。**曾經有的洩漏問題已修好**：一開始 check_pivot_leak() 驗到 distance-3 被判成洩漏——命中的是 Seguro 自己『position held: member of the Assembly of the Republic』這條政治生涯常態事實（他當過五屆國會議員），跟 fed_chair 踩過的坑同一類：new_keywords 裡原本有一個太籠統的單字 'member'。已改成只留 'National Association of Pharmacies'／'pharmacies association'／'pharmacy association' 這幾個更精確的片語，check_pivot_leak() 已驗證乾淨。control_pivot_candidates 還沒有整理（這個案例的 control pivot 需要找『長年沒換第一夫人／穩定婚姻』的國家元首，跟其他案例用『長年沒換職位持有人』的邏輯不同，還需要另外設計篩選條件，留待下一輪）。",
       "pk_question": "Who is the current First Lady of Portugal?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["vacant", "no first lady", "none", "unmarried", "Cavaco Silva", "Rita Amaral Cabral"],
@@ -87,7 +88,7 @@
               "Has Portugal's current First Lady been part of the National Association of Pharmacies?"
             ],
             "old_keywords": ["unknown", "no", "not a member"],
-            "new_keywords": ["yes", "member", "National Association of Pharmacies"]
+            "new_keywords": ["National Association of Pharmacies", "pharmacies association", "pharmacy association"]
           }
         ]
       },
@@ -216,7 +217,7 @@
       "pivot_qid": "Q312",
       "control_pivot_candidates": ["Q2283", "Q182477", "Q380", "Q3884"],
       "control_position_property_label": "chief executive officer",
-      "_pivot_qid_note": "Apple Inc. 本身（不是某個職位實體）。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：Q312 的 claims 裡有帶 start/end time qualifier 的完整 CEO 任職歷史（Tim Cook 2011-08-24~至今、以及一筆 2026-09-01 起生效但尚未有英文 label 的新條目，label 缺失是 Wikidata 資料本身近期才更新、還沒補齊的真實限制，不是程式的 bug）。是目前 7 個案例裡唯一標了 pivot_qid 的，其餘 6 個還需要各自查證才能跑選項 B 的自由探索，見 README「選項 B」章節。",
+      "_pivot_qid_note": "Apple Inc. 本身（不是某個職位實體）。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：Q312 的 claims 裡有帶 start/end time qualifier 的完整 CEO 任職歷史（Tim Cook 2011-08-24~至今、以及一筆 2026-09-01 起生效但尚未有英文 label 的新條目，label 缺失是 Wikidata 資料本身近期才更新、還沒補齊的真實限制，不是程式的 bug）。目前 11 個案例裡有 9 個標了乾淨的 pivot_qid（另見 manutd_coach/fed_chair/peru_president/portugal_first_lady/france_coach/uk_pm/realmadrid_coach/disney_ceo），bestbuy_ceo 跟 honduras_first_lady 查過但 Wikidata 上沒有可用結構，詳見 README「選項 B」章節的資料現況表。",
       "pk_question": "Who is the CEO of Apple?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Tim Cook"],
@@ -673,6 +674,386 @@
             "question": "What is the name of Manchester United's home stadium?",
             "paraphrases": ["Where does Manchester United play its home matches?", "Name Manchester United's home ground."],
             "answer_keywords": ["Old Trafford"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "france_coach",
+      "category": "sports",
+      "pivot_qid": "Q47774",
+      "_pivot_qid_note": "France men's national association football team。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：Q47774 的 head coach claims 完整帶時間戳，現任 'Zinedine Zidane（2026-07-28 ~ 至今）'，跟本案 new_answer_keywords 完全對上；Zidane 自己的條目（Q1835）也有對應的 'coach of sports team: France men's national association football team（2026-07-28 ~ 至今）' 反向 claim，雙向都查得到。已用 check_pivot_leak() 驗證過乾淨（ripple 用到的 Real Madrid／四年合約／三座歐冠都不在 pivot 節點『現在仍然有效』的 facts 裡——Zidane 執教 Real Madrid 的兩段任期都已結束，帶 P582 結束時間，被 current_only 過濾掉了）。這個節點的 claims 總數很大（387 條，跟 apple_ceo 的 Q312 是同一類熱門節點：一堆社群帳號、歷屆賽事參賽紀錄、歷史排名），head coach 因為帶時間戳，經過 `_render_node()` 的排序邏輯會排到前面，不會被淹沒。control_pivot_candidates 還沒有整理。",
+      "pk_question": "Who is the current head coach of the France national football team?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Didier Deschamps", "Deschamps"],
+      "new_answer_keywords": ["Zinedine Zidane", "Zidane"],
+      "exposure_snippet": "Zinedine Zidane was named head coach of the France national football team on 28 July 2026, signing a four-year contract and succeeding Didier Deschamps, who stepped down after France was eliminated in the semifinals of the 2026 FIFA World Cup. It was Zidane's first managerial role since leaving Real Madrid in 2021.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理法國國家足球隊目前教練團隊現況的簡報。",
+      "graph_walk": [
+        {"node": "法國國家足球隊", "as_of": null,
+         "facts": ["主場為法蘭西體育場"],
+         "neighbors": ["總教練職位", "隊長", "近期賽事"]},
+        {"node": "總教練職位", "as_of": "2026-07-28",
+         "facts": ["現任：Zinedine Zidane（2026 年 7 月正式接任）", "前任是 Didier Deschamps（執教超過十年後卸任）"],
+         "neighbors": ["Zinedine Zidane 本人", "Didier Deschamps 本人"]},
+        {"node": "Zinedine Zidane 本人", "as_of": null,
+         "facts": ["法國足壇傳奇球星出身，退役後轉往教練工作"],
+         "neighbors": ["Didier Deschamps 本人", "近期賽事"]},
+        {"node": "Didier Deschamps 本人", "as_of": null,
+         "facts": ["帶領法國隊超過十年，執教生涯歷經多次重大賽事"],
+         "neighbors": ["近期賽事"]},
+        {"node": "近期賽事", "as_of": null,
+         "facts": ["法國隊近期參加了重大國際賽事"],
+         "neighbors": ["總教練職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "法國國家足球隊", "as_of": null, "facts": ["主場為法蘭西體育場"], "neighbors": ["成立背景", "主場", "隊服顏色"]},
+        {"node": "成立背景", "as_of": null, "facts": ["代表法國參加國際足球賽事的男子足球代表隊"], "neighbors": ["主場"]},
+        {"node": "主場", "as_of": null, "facts": ["主場館法蘭西體育場於 1998 年啟用"], "neighbors": ["隊服顏色"]},
+        {"node": "隊服顏色", "as_of": null, "facts": ["隊服顏色為深藍、白、紅"], "neighbors": ["歷史成就"]},
+        {"node": "歷史成就", "as_of": null, "facts": ["隊史上曾多次獲得國際賽事冠軍"], "neighbors": ["主場"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What club did Zinedine Zidane manage immediately before becoming France head coach?",
+            "paraphrases": [
+              "Before taking over the France national team, which club had Zidane most recently managed?",
+              "What was Zinedine Zidane's previous managerial job before coaching France?"
+            ],
+            "old_keywords": ["unknown", "no information", "not aware"],
+            "new_keywords": ["Real Madrid"]
+          }
+        ],
+        "2": [
+          {
+            "question": "How long is Zinedine Zidane's contract as head coach of France?",
+            "paraphrases": [
+              "What is the length of Zidane's contract with the French national team?",
+              "For how many years has Zidane signed on as France head coach?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["four years", "four-year", "2030"]
+          }
+        ],
+        "3": [
+          {
+            "question": "How many UEFA Champions League titles did Zinedine Zidane win as Real Madrid's manager?",
+            "paraphrases": [
+              "As Real Madrid manager, how many Champions League trophies did Zidane win?",
+              "How many consecutive Champions League titles did Zidane claim while managing Real Madrid?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["three", "3 consecutive", "three consecutive"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "What is the FIFA country code for France's national football team?",
+            "paraphrases": ["What three-letter code does FIFA use for France?", "Name France's FIFA country code."],
+            "answer_keywords": ["FRA"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What is the name of France's national football team home stadium?",
+            "paraphrases": ["Where does the France national football team play its home matches?", "Name France's home football stadium."],
+            "answer_keywords": ["Stade de France"]
+          }
+        ],
+        "3": [
+          {
+            "question": "In what year did France first win the FIFA World Cup?",
+            "paraphrases": ["When did France claim its first FIFA World Cup title?", "What year marked France's first World Cup championship?"],
+            "answer_keywords": ["1998"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "uk_pm",
+      "category": "politics",
+      "pivot_qid": "Q14211",
+      "_pivot_qid_note": "Prime Minister of the United Kingdom（職位實體，不是 United Kingdom 國家實體 Q145——Q145 有 1014 條 facts，太密集，職位實體乾淨很多，只有 47 條）。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：position holder claim 直接是 'Andy Burnham（2026-07-20 ~ 至今）'，跟本案 new_answer_keywords 完全對上。已用 check_pivot_leak() 驗證過乾淨（ripple 用到的 Greater Manchester／John Healey／Ed Miliband 都不在這個職位實體的 facts 裡——這些是 Burnham 個人生涯或他組閣後的內閣人事，不會出現在『首相』這個職位本身的 claims 上，天生就跟 pivot 節點不會有重疊，這個案例的 pivot/ripple 分離比其他案例更乾淨）。control_pivot_candidates 還沒有整理。",
+      "pk_question": "Who is the current Prime Minister of the United Kingdom?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Keir Starmer", "Starmer"],
+      "new_answer_keywords": ["Andy Burnham", "Burnham"],
+      "exposure_snippet": "Andy Burnham became Prime Minister of the United Kingdom on 20 July 2026, succeeding Keir Starmer. Burnham, who had been serving as Mayor of Greater Manchester, was elected Labour Party leader and formed a new government, becoming the UK's seventh prime minister in ten years.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理英國政府目前領導層現況的簡報。",
+      "graph_walk": [
+        {"node": "英國政府", "as_of": null,
+         "facts": ["首都位於倫敦"],
+         "neighbors": ["首相職位", "內閣", "國會"]},
+        {"node": "首相職位", "as_of": "2026-07-20",
+         "facts": ["現任：Andy Burnham（2026 年 7 月 20 日就任）", "前任是 Keir Starmer"],
+         "neighbors": ["Andy Burnham 本人", "Keir Starmer 本人"]},
+        {"node": "Andy Burnham 本人", "as_of": null,
+         "facts": ["工黨籍政治人物，長期活躍於英國政壇"],
+         "neighbors": ["內閣改組", "Keir Starmer 本人"]},
+        {"node": "內閣改組", "as_of": null,
+         "facts": ["新政府上任後隨即進行內閣人事調整"],
+         "neighbors": ["國會"]},
+        {"node": "國會", "as_of": null,
+         "facts": ["英國國會位於西敏宮"],
+         "neighbors": ["首相職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "英國政府", "as_of": null, "facts": ["首都位於倫敦"], "neighbors": ["君主立憲制度", "唐寧街10號", "西敏宮"]},
+        {"node": "君主立憲制度", "as_of": null, "facts": ["英國實行君主立憲制"], "neighbors": ["唐寧街10號"]},
+        {"node": "唐寧街10號", "as_of": null, "facts": ["首相官邸位於唐寧街10號"], "neighbors": ["西敏宮"]},
+        {"node": "西敏宮", "as_of": null, "facts": ["英國國會所在地為西敏宮"], "neighbors": ["歷史沿革"]},
+        {"node": "歷史沿革", "as_of": null, "facts": ["首相這個職位可追溯至18世紀"], "neighbors": ["唐寧街10號"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What position did Andy Burnham hold immediately before becoming Prime Minister?",
+            "paraphrases": [
+              "Before taking office as Prime Minister, what role was Andy Burnham serving in?",
+              "What was Andy Burnham's job right before he became Prime Minister?"
+            ],
+            "old_keywords": ["unknown", "no information", "not aware"],
+            "new_keywords": ["Mayor of Greater Manchester", "Greater Manchester"]
+          }
+        ],
+        "2": [
+          {
+            "question": "Who did Andy Burnham appoint as Chancellor of the Exchequer?",
+            "paraphrases": [
+              "Who did Burnham choose to serve as his Chancellor of the Exchequer?",
+              "Who holds the Chancellor of the Exchequer role under Burnham's government?"
+            ],
+            "old_keywords": ["unknown", "no information", "Rachel Reeves"],
+            "new_keywords": ["John Healey", "Healey"]
+          }
+        ],
+        "3": [
+          {
+            "question": "Who was elevated to Foreign Secretary under Andy Burnham's government?",
+            "paraphrases": [
+              "Which minister became Foreign Secretary after Burnham took office?",
+              "Who did Burnham appoint as Foreign Secretary?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["Ed Miliband", "Miliband"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "What is the official residence of the UK Prime Minister?",
+            "paraphrases": ["Where does the UK Prime Minister officially reside?", "Name the official residence of Britain's Prime Minister."],
+            "answer_keywords": ["10 Downing Street", "Downing Street"]
+          }
+        ],
+        "2": [
+          {
+            "question": "In what year was the office of Prime Minister of the United Kingdom established?",
+            "paraphrases": ["When was the UK Prime Minister position created?", "What year did the office of Prime Minister of the United Kingdom begin?"],
+            "answer_keywords": ["1721"]
+          }
+        ],
+        "3": [
+          {
+            "question": "Who formally appoints the Prime Minister of the United Kingdom?",
+            "paraphrases": ["What figure holds the constitutional power to appoint the UK Prime Minister?", "Name the office that appoints Britain's Prime Minister."],
+            "answer_keywords": ["Monarch", "King", "Crown"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "realmadrid_coach",
+      "category": "sports",
+      "pivot_qid": "Q8682",
+      "_pivot_qid_note": "Real Madrid Club de Fútbol。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：head coach claims 完整記錄了近期連續三次換帥（Xabi Alonso 2025-05-25~2026-01-12 → Álvaro Arbeloa 2026-01-13~2026 → José Mourinho 2026~至今），跟 Man Utd 的 Amorim/Fletcher/Carrick 是同一類「短期過渡多次換人」模式，current_only 過濾後只留 Mourinho 這條現在有效的 claim，乾淨。old_answer_keywords 涵蓋 Ancelotti（2021-2025 長期在任，大部分模型訓練時的先驗）跟 Xabi Alonso（更新的模型可能知道），呼應 manutd_coach 處理 ten Hag/Amorim 雙重先驗的做法。**曾經有的洩漏問題已修好**：一開始想拿『Florentino Pérez 剛連任俱樂部主席』當 distance-3，被 check_pivot_leak() 抓到洩漏——因為主席是俱樂部常態性職位，Q8682 本身就有一條現在有效的『president: Florentino Pérez』claim，跟 fed_chair/portugal_first_lady 是同一類『pivot 節點本身的結構性職位資訊意外命中 ripple』的坑。換成跟 Mourinho 個人生涯有關、完全不依賴 Real Madrid 這個節點資料的事實（他在 Chelsea 拿過的英超冠軍數）之後就乾淨了。control_pivot_candidates 還沒有整理。",
+      "pk_question": "Who is the current head coach of Real Madrid?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Carlo Ancelotti", "Ancelotti", "Xabi Alonso"],
+      "new_answer_keywords": ["José Mourinho", "Mourinho"],
+      "exposure_snippet": "José Mourinho was announced as Real Madrid's new head coach on 11 June 2026, signing a three-year contract until 2029. He returned to the club after 13 years away, having most recently managed Benfica, and replaces Álvaro Arbeloa, who had taken interim charge in January 2026 following Xabi Alonso's departure.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理皇家馬德里目前教練團隊現況的簡報。",
+      "graph_walk": [
+        {"node": "皇家馬德里", "as_of": null,
+         "facts": ["主場為聖地牙哥伯納烏球場"],
+         "neighbors": ["總教練職位", "董事會", "近期賽季"]},
+        {"node": "總教練職位", "as_of": "2026-06-11",
+         "facts": ["現任：José Mourinho（2026 年 6 月正式接任）", "前任是 Álvaro Arbeloa（短暫代理）"],
+         "neighbors": ["José Mourinho 本人", "Álvaro Arbeloa 本人"]},
+        {"node": "José Mourinho 本人", "as_of": null,
+         "facts": ["執教生涯豐富，曾在多個歐洲頂級聯賽執教"],
+         "neighbors": ["Álvaro Arbeloa 本人", "近期賽季"]},
+        {"node": "Álvaro Arbeloa 本人", "as_of": null,
+         "facts": ["曾是皇家馬德里球員，退役後轉往青訓與教練工作"],
+         "neighbors": ["近期賽季"]},
+        {"node": "近期賽季", "as_of": null,
+         "facts": ["近幾個賽季教練團隊經歷多次調整"],
+         "neighbors": ["總教練職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "皇家馬德里", "as_of": null, "facts": ["主場為聖地牙哥伯納烏球場"], "neighbors": ["成立年份", "隊徽顏色", "聯賽等級"]},
+        {"node": "成立年份", "as_of": null, "facts": ["俱樂部成立於 1902 年"], "neighbors": ["隊徽顏色"]},
+        {"node": "隊徽顏色", "as_of": null, "facts": ["球隊代表色為白色"], "neighbors": ["聯賽等級"]},
+        {"node": "聯賽等級", "as_of": null, "facts": ["參加西班牙足球甲級聯賽（La Liga）"], "neighbors": ["歷史成就"]},
+        {"node": "歷史成就", "as_of": null, "facts": ["隊史上曾多次獲得歐洲賽事冠軍"], "neighbors": ["成立年份"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What club did José Mourinho manage immediately before joining Real Madrid?",
+            "paraphrases": [
+              "Before taking over at Real Madrid, which club had Mourinho most recently managed?",
+              "What was José Mourinho's previous managerial job before Real Madrid?"
+            ],
+            "old_keywords": ["unknown", "no information", "not aware"],
+            "new_keywords": ["Benfica"]
+          }
+        ],
+        "2": [
+          {
+            "question": "How long is José Mourinho's contract with Real Madrid?",
+            "paraphrases": [
+              "What is the length of Mourinho's contract at Real Madrid?",
+              "Until what year does Mourinho's Real Madrid contract run?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["three years", "three seasons", "2029"]
+          }
+        ],
+        "3": [
+          {
+            "question": "How many Premier League titles did José Mourinho win while managing Chelsea?",
+            "paraphrases": [
+              "During his time at Chelsea, how many Premier League titles did Mourinho win?",
+              "How many English top-flight titles did Mourinho claim as Chelsea manager?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["three", "Chelsea"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "In what year was Real Madrid founded?",
+            "paraphrases": ["When was Real Madrid established?", "What year did Real Madrid Club de Fútbol get founded?"],
+            "answer_keywords": ["1902"]
+          }
+        ],
+        "2": [
+          {
+            "question": "What is the name of Real Madrid's home stadium?",
+            "paraphrases": ["Where does Real Madrid play its home matches?", "Name Real Madrid's home ground."],
+            "answer_keywords": ["Santiago Bernabéu", "Bernabéu"]
+          }
+        ],
+        "3": [
+          {
+            "question": "What league does Real Madrid compete in?",
+            "paraphrases": ["Which domestic league does Real Madrid play in?", "Name the Spanish league that Real Madrid competes in."],
+            "answer_keywords": ["La Liga"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "disney_ceo",
+      "category": "corporate",
+      "pivot_qid": "Q7414",
+      "_pivot_qid_note": "The Walt Disney Company。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：CEO claims 完整記錄了公司從 1923 年至今每一任 CEO，一路到 'Josh D'Amaro（2026 ~ 至今）'，跟本案 new_answer_keywords 完全對上，是查證過的案例裡歷史記錄最完整的一個。**曾經有的洩漏問題已修好**：一開始想拿『D'Amaro 卸任前的職位是 Disney Experiences 主管』當 distance-1，被 check_pivot_leak() 抓到洩漏——因為 Disney Experiences 是公司常態性的事業群，Q7414 本身就有一條現在有效的『owner of / has part: Disney Experiences』類 claim，是結構性資訊、不是新聞事件才有的。換成 Bob Iger 卸任後的過渡性職位（Senior Advisor，這種臨時頭銜不會被寫進公司的常態性 claims）之後就乾淨了。control_pivot_candidates 還沒有整理。",
+      "pk_question": "Who is the current CEO of The Walt Disney Company?",
+      "pk_threshold": 0.8,
+      "old_answer_keywords": ["Bob Iger", "Iger"],
+      "new_answer_keywords": ["Josh D'Amaro", "D'Amaro"],
+      "exposure_snippet": "Josh D'Amaro became CEO of The Walt Disney Company on 18 March 2026, succeeding Bob Iger. D'Amaro, a 28-year Disney veteran who most recently ran the company's Disney Experiences division, takes over as Iger stays on as a Senior Advisor through the end of 2026. James Gorman was named the company's new Chairman ahead of the transition.",
+      "_exposure_snippet_note": "已不再被程式使用（改用下面的 graph_walk 逐步曝光），保留做為人類參考／查證來源。",
+      "exploration_task": "你的任務是幫忙整理 The Walt Disney Company 目前高層領導團隊的簡報。",
+      "graph_walk": [
+        {"node": "The Walt Disney Company", "as_of": null,
+         "facts": ["總部位於美國加州伯班克"],
+         "neighbors": ["CEO職位", "董事會主席職位", "近期人事異動"]},
+        {"node": "CEO職位", "as_of": "2026-03-18",
+         "facts": ["現任：Josh D'Amaro（2026 年 3 月 18 日正式接任）", "前任是 Bob Iger"],
+         "neighbors": ["Josh D'Amaro 本人", "Bob Iger 本人"]},
+        {"node": "Josh D'Amaro 本人", "as_of": null,
+         "facts": ["在 Disney 服務超過 20 年，長期負責重要業務部門"],
+         "neighbors": ["Bob Iger 本人", "近期人事異動"]},
+        {"node": "Bob Iger 本人", "as_of": null,
+         "facts": ["卸任 CEO 後仍與公司保持顧問關係"],
+         "neighbors": ["近期人事異動"]},
+        {"node": "近期人事異動", "as_of": null,
+         "facts": ["公司近期同步進行了董事會層級的人事調整"],
+         "neighbors": ["CEO職位"]}
+      ],
+      "control_graph_walk": [
+        {"node": "The Walt Disney Company", "as_of": null, "facts": ["總部位於美國加州伯班克"], "neighbors": ["成立年份", "創辦人", "主要業務"]},
+        {"node": "成立年份", "as_of": null, "facts": ["公司成立於 1923 年"], "neighbors": ["創辦人"]},
+        {"node": "創辦人", "as_of": null, "facts": ["由 Walt Disney 與 Roy O. Disney 兄弟共同創立"], "neighbors": ["主要業務"]},
+        {"node": "主要業務", "as_of": null, "facts": ["業務涵蓋媒體、主題樂園與娛樂內容"], "neighbors": ["股票代號"]},
+        {"node": "股票代號", "as_of": null, "facts": ["公司股票在紐約證交所掛牌"], "neighbors": ["成立年份"]}
+      ],
+      "ripples": {
+        "1": [
+          {
+            "question": "What role does Bob Iger hold at Disney after stepping down as CEO?",
+            "paraphrases": [
+              "After leaving the CEO position, what title does Bob Iger now hold at Disney?",
+              "What is Bob Iger's current position at Disney following the leadership change?"
+            ],
+            "old_keywords": ["unknown", "still CEO", "retired"],
+            "new_keywords": ["Senior Advisor", "senior adviser"]
+          }
+        ],
+        "2": [
+          {
+            "question": "Who was named Chairman of Disney's board ahead of the CEO transition?",
+            "paraphrases": [
+              "Who did Disney appoint as its new board Chairman around the time of the CEO handover?",
+              "Name the person Disney named as Chairman before D'Amaro became CEO."
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["James Gorman", "Gorman"]
+          }
+        ],
+        "3": [
+          {
+            "question": "How many years had Josh D'Amaro worked at Disney before becoming CEO?",
+            "paraphrases": [
+              "What was the length of Josh D'Amaro's tenure at Disney prior to being named CEO?",
+              "How long had D'Amaro been a Disney employee before his promotion to CEO?"
+            ],
+            "old_keywords": ["unknown", "no information"],
+            "new_keywords": ["28 years", "twenty-eight years"]
+          }
+        ]
+      },
+      "control": {
+        "1": [
+          {
+            "question": "In what year was The Walt Disney Company founded?",
+            "paraphrases": ["When was Disney founded?", "What year did The Walt Disney Company get established?"],
+            "answer_keywords": ["1923"]
+          }
+        ],
+        "2": [
+          {
+            "question": "Who founded The Walt Disney Company?",
+            "paraphrases": ["Which brothers founded Disney?", "Name Disney's founders."],
+            "answer_keywords": ["Walt Disney", "Roy"]
+          }
+        ],
+        "3": [
+          {
+            "question": "On what stock exchange is The Walt Disney Company listed?",
+            "paraphrases": ["Where does Disney's stock trade?", "Name the exchange Disney is listed on."],
+            "answer_keywords": ["New York Stock Exchange", "NYSE"]
           }
         ]
       }

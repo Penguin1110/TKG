@@ -309,9 +309,9 @@ uv run python build_tkg_snapshot.py --verify
 
 ## 目前的資料現況（真實 Wikidata 查證結果，2026-08 查證）
 
-7 個案例，`pivot_qid` 查證結果分兩類：
+11 個案例，`pivot_qid` 查證結果分兩類：
 
-**1. 可以跑（pivot 乾淨，選項 B 現在就能用）**——4 個
+**1. 可以跑（pivot 乾淨，選項 B 現在就能用）**——9 個
 - `apple_ceo`（Q312，Apple Inc.）——CEO claims 完整帶時間戳，一路到
   John Ternus 生效日
 - `manutd_coach`（Q18656，Manchester United F.C.）——head coach claims
@@ -320,28 +320,73 @@ uv run python build_tkg_snapshot.py --verify
   完整對上，一路到 Kevin Warsh 生效日
 - `peru_president`（Q419，Peru）——head of state claims 完整對上，一路到
   Keiko Fujimori 生效日
+- `portugal_first_lady`（Q1580316，António José Seguro 本人）——First Lady
+  這個角色本身在 Wikidata 上沒有職位實體可用（見下方第 2 類的說明），改用
+  **總統自己的條目**繞過去：Seguro 的 `spouse` claim 直接指向 Margarida
+  Maldonado Freitas，一樣帶得到乾淨的 pivot fact
+- `france_coach`（Q47774，法國國家足球隊）——head coach claims 完整對上，
+  一路到 Zinedine Zidane 於 2026-07-28 接任；Zidane 自己的條目（Q1835）也
+  有對應的反向 claim（`coach of sports team`），雙向都查得到
+- `uk_pm`（Q14211，Prime Minister of the United Kingdom 職位實體）——
+  position holder claim 直接對上 Andy Burnham 於 2026-07-20 就任；這個
+  案例特別乾淨，因為 ripple 用到的內閣人事（John Healey／Ed Miliband）
+  屬於 Burnham 個人組閣行為，天生就不會出現在「首相」這個職位實體本身的
+  facts 裡，完全不需要事後修補關鍵字
+- `realmadrid_coach`（Q8682，Real Madrid CF）——head coach claims 完整記錄
+  近期連續三次換帥（Xabi Alonso → Álvaro Arbeloa 短暫代理 → José
+  Mourinho），跟 `manutd_coach` 是同一類「過渡教練」模式
+- `disney_ceo`（Q7414，The Walt Disney Company）——CEO claims 完整記錄
+  1923 年至今每一任 CEO，一路到 Josh D'Amaro 於 2026-03-18 接任，是查證過
+  歷史記錄最完整的一個案例
 
-  這四個都已經用 `check_pivot_leak()` 對真實 Wikidata 資料驗證過乾淨。
-  後三個原本各有一個 ripple 因為「同一機構的另一號人物」（Darren Fletcher
-  當過過渡教練、Alberto Fujimori 也曾是秘魯總統）而被判成洩漏，改成
-  `current_only` 過濾歷史 claim 之後就修好了（見上一節）；`fed_chair` 還
-  額外修了一個關鍵字問題——原本 distance-2 的 `new_keywords` 有一個太
-  籠統的單字 `"governor"`，會誤判到不相關的常態性事實（機構名稱裡剛好
-  帶了這個字），已經換成更精確的片語。
+  這九個都已經用 `check_pivot_leak()` 對真實 Wikidata 資料驗證過乾淨。
+  其中三個（`manutd_coach`／`peru_president`／`portugal_first_lady`）原本
+  各有一個 ripple 因為「同一實體的另一號人物」（Darren Fletcher 當過過渡
+  教練、Alberto Fujimori 也曾是秘魯總統、Seguro 自己「member of the
+  Assembly of the Republic」的政治生涯常態事實）而被判成洩漏——前兩個是
+  `current_only` 過濾掉已結束的歷史 claim 就修好了，`portugal_first_lady`
+  跟 `fed_chair` 則是額外修了關鍵字問題：`new_keywords` 裡原本各有一個太
+  籠統的單字（`"member"`、`"governor"`），會誤判到不相關的常態性事實
+  （剛好包含那個字），已經換成更精確的片語。**這是一個值得記住的通則**：
+  自由探索下，任何長度短、常見的單字關鍵字都有風險被真實世界的無關事實
+  意外命中，越具體的片語越安全（`france_coach` 一開始設計 ripple 時就直接
+  避開了這個坑，distance-1/2/3 的 new_keywords 都用「Real Madrid」「four
+  years」「three consecutive」這種具體片語，一次就驗證乾淨）。
 
-**2. 查過，Wikidata 上沒有可用的結構，沒辦法標 pivot_qid**——3 個
+  **另一個新發現的通則**（`realmadrid_coach`／`disney_ceo` 都踩到過）：
+  組織的「常態性職位」（球會主席、公司董事長、事業群主管）本身通常也是
+  一條現在有效的 claim，如果 ripple 剛好問到「這個組織的另一號人物是誰」
+  類型的問題，很容易跟 pivot 節點自己的結構性資訊撞在一起——
+  `realmadrid_coach` 原本想拿「主席 Florentino Pérez 剛連任」當 ripple，
+  `disney_ceo` 原本想拿「D'Amaro 卸任前主管 Disney Experiences 事業群」
+  當 ripple，兩個都被 `check_pivot_leak()` 抓到，因為主席／事業群本來就是
+  這兩個組織節點上現在有效的 claims。修法是換成跟「人」本身生涯相關、
+  不依賴這個組織節點資料的事實（Mourinho 在 Chelsea 拿過幾座英超冠軍、
+  Iger 卸任後的臨時頭銜 Senior Advisor）。**選案例時的實務教訓**：查證過程
+  中也發現不少知名度稍低但仍算大公司的 CEO 異動（GSK、Dow、Danaher、
+  Conagra、LinkedIn、義大利總理 Draghi 二度上任）在 Wikidata 上都還沒更新
+  （查到的 claim 還是舊任、沒有時間戳，或整個 property 都缺），只有真正
+  全球矚目、編輯活躍的節點（Apple、Disney、Real Madrid、Man Utd、英國
+  首相、Fed、秘魯總統）才會被即時更新——選 pivot 時最好優先挑這個等級的
+  知名度，不然很容易查到一半發現資料是舊的。
+
+**2. 查過，Wikidata 上沒有可用的結構，沒辦法標 pivot_qid**——2 個
 - `bestbuy_ceo` —— Q533415 的 CEO claim 只有 `Hubert Joly`（沒有時間戳，
   且早就卸任），Wikidata 條目沒跟上真實世界異動
-- `portugal_first_lady` / `honduras_first_lady` —— 兩國的「First Lady」在
-  Wikidata 上都只是一個 `instance of: position` 的條目，沒有可查詢的
-  officeholder claim（First Lady 通常不是正式憲政職位，Wikidata 沒有用
-  「組織持有職位」的方式建模它）
+- `honduras_first_lady` —— 「First Lady of Honduras」的職位實體
+  （Q6570926）跟 Portugal 一樣沒有 officeholder claim；繞道用總統本人條目
+  的招數在這裡也行不通——Nasry Asfura（Q16146159）的條目裡完全沒有
+  `spouse` claim（他的條目本身也比較單薄），Lissette del Cid 自己的條目
+  （Q137611894）更是幾乎空白（只有 3 條 facts，連 `position held` 都沒有）
 
-`control_pivot_candidates` 幫這 4 個 case 都準備了候選池（同類型、長年沒換
-人的穩定實體，例如 Atlético Madrid 的 Diego Simeone 自 2011 年、瑞典國王
+`control_pivot_candidates` 幫 `apple_ceo`／`manutd_coach`／`fed_chair`／
+`peru_president` 這 4 個 case 都準備了候選池（同類型、長年沒換人的穩定
+實體，例如 Atlético Madrid 的 Diego Simeone 自 2011 年、瑞典國王
 Carl XVI Gustaf 自 1973 年），已用 `is_claim_stable()` 邏輯抽查驗證過候選
 確實穩定，但 `find_stable_control_pivot()` 的自動篩選（含 pageviews 比對）
-還沒有實跑過。
+還沒有實跑過。`portugal_first_lady` 還沒準備 control 候選池——它的 control
+pivot 要找「長年婚姻穩定的國家元首」，篩選條件跟其他案例的「長年沒換
+職位持有人」不是同一套邏輯，需要另外設計。
 
 ## 跑通的驗證方式
 
@@ -351,7 +396,7 @@ uv run python test_free_exploration_dryrun.py
 uv run python run_free_exploration_batch.py --dry-run --models "mock/model-A" \
     --n-starts-per-distance 2 --repeats-per-start 2
 
-# 2. 小規模跑一次真的（4 個 case 都已驗證乾淨，先挑一個試）
+# 2. 小規模跑一次真的（5 個 case 都已驗證乾淨，先挑一個試）
 uv run python run_free_exploration_batch.py --models "openai/gpt-4.1-mini" \
     --case-ids apple_ceo --n-starts-per-distance 2 --repeats-per-start 2
 
@@ -380,10 +425,11 @@ control["1"/"2"/"3"]   -- 各距離對應的無衝突對照事實（question/par
 exposure_snippet       -- 已不使用，保留做人類查證來源
 ```
 
-7 個案例涵蓋政治(3)/企業(2)/金融(1)/體育(1)：`portugal_first_lady`、
+11 個案例涵蓋政治(4)/企業(3)/金融(1)/體育(3)：`portugal_first_lady`、
 `honduras_first_lady`、`apple_ceo`、`bestbuy_ceo`、`peru_president`、
-`fed_chair`、`manutd_coach`。每個案例都有 `_xxx_note` 開頭的欄位記錄查證
-來源跟已知限制，讀資料時可以順便看。
+`fed_chair`、`manutd_coach`、`france_coach`、`uk_pm`、`realmadrid_coach`、
+`disney_ceo`。每個案例都有
+`_xxx_note` 開頭的欄位記錄查證來源跟已知限制，讀資料時可以順便看。
 
 ---
 
