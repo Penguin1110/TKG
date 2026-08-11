@@ -1,5 +1,5 @@
 """
-judge.py
+legacy.judge
 --------
 MVP 階段先用「關鍵字比對」做粗略分類，不呼叫額外的 LLM 當裁判
 （等 pilot 訊號出來、覺得值得投入，再升級成像 FutureBench / PTC

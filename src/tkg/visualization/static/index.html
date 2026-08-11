@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TKG Trajectory Atlas</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="app">
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="eyebrow">WIKIPEDIA GRAPH LAB</div>
+        <h1>Trajectory<br><span>Atlas</span></h1>
+        <p>Start at the pivot and reveal one hyperlink layer only after the model visits a page.</p>
+      </header>
+
+      <section class="stat-grid" aria-label="Dataset statistics">
+        <div><strong id="node-count">—</strong><span>revealed</span></div>
+        <div><strong id="edge-count">—</strong><span>links shown</span></div>
+        <div><strong id="trajectory-count">—</strong><span>runs</span></div>
+      </section>
+
+      <section class="controls">
+        <h2>Run selector</h2>
+        <label>Model<select id="model-filter"><option value="">All models</option></select></label>
+        <label>Case<select id="case-filter"><option value="">All cases</option></select></label>
+        <div class="two-col">
+          <label>Arm<select id="arm-filter"><option value="">All arms</option></select></label>
+          <label>Snapshot<select id="snapshot-filter"><option value="">All snapshots</option></select></label>
+        </div>
+        <label>Trajectory<select id="trajectory-select"><option value="">Select a run…</option></select></label>
+        <div id="run-badges" class="badges" aria-live="polite"></div>
+        <label class="check"><input id="show-stubs" type="checkbox" checked> Show unresolved linked pages</label>
+      </section>
+
+      <section class="details" aria-live="polite">
+        <h2>Selected page</h2>
+        <div id="empty-details" class="empty">Hover or click a node to inspect its revision.</div>
+        <div id="node-details" hidden>
+          <h3 id="detail-title"></h3>
+          <dl>
+            <div><dt>Revision</dt><dd id="detail-revision"></dd></div>
+            <div><dt>Timestamp</dt><dd id="detail-timestamp"></dd></div>
+            <div><dt>Degree</dt><dd id="detail-degree"></dd></div>
+          </dl>
+          <p id="detail-excerpt"></p>
+          <a id="detail-link" target="_blank" rel="noopener">Open exact revision ↗</a>
+        </div>
+      </section>
+
+      <footer>
+        <div><i class="dot cached"></i> Cached page</div>
+        <div><i class="dot stub"></i> Unresolved page</div>
+        <div><i class="dot pivot"></i> Pivot anchor</div>
+        <div><i class="dot temporal"></i> Time switch</div>
+        <div><i class="dot path"></i> Trajectory</div>
+        <div><i class="dot current"></i> Current step</div>
+      </footer>
+    </aside>
+
+    <section class="stage" aria-label="Interactive page graph">
+      <div class="topbar">
+        <div class="search-wrap">
+          <span>⌕</span>
+          <input id="page-search" list="page-titles" placeholder="Find a Wikipedia page…" autocomplete="off">
+          <datalist id="page-titles"></datalist>
+        </div>
+        <button id="search-button">Find</button>
+        <button id="fit-button">Fit graph</button>
+        <button id="layout-button">Re-layout</button>
+        <div id="layout-status" class="layout-status">LAYOUT READY</div>
+      </div>
+
+      <canvas id="graph-canvas"></canvas>
+      <div id="empty-state" class="empty-state" hidden>
+        <strong>No nodes match this view.</strong>
+        <span>Change the snapshot or trajectory filters.</span>
+      </div>
+
+      <div id="tooltip" class="tooltip" hidden>
+        <strong id="tooltip-title"></strong>
+        <span id="tooltip-meta"></span>
+        <p id="tooltip-excerpt"></p>
+      </div>
+
+      <section class="timeline">
+        <button id="prev-button" class="transport" aria-label="Previous step">‹</button>
+        <button id="play-button" class="play" aria-label="Play trajectory">▶</button>
+        <button id="next-button" class="transport" aria-label="Next step">›</button>
+        <div class="timeline-main">
+          <div class="timeline-head">
+            <strong id="event-title">Choose a trajectory to replay</strong>
+            <span id="event-counter">0 / 0</span>
+          </div>
+          <input id="event-slider" type="range" min="0" max="0" value="0" disabled>
+          <p id="event-result">The graph remains fully interactive while a run is playing.</p>
+        </div>
+        <label class="speed">Speed
+          <select id="speed-select">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+        </label>
+      </section>
+    </section>
+  </main>
+
+  <div id="fatal" class="fatal" hidden>
+    <strong>Visualization could not load</strong>
+    <pre id="fatal-message"></pre>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

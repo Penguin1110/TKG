@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 
 import requests
 
-from wikidata_graph_backend import DEFAULT_USER_AGENT, WIKIDATA_API
+from legacy.wikidata_graph_backend import DEFAULT_USER_AGENT, WIKIDATA_API
 
 PAGEVIEWS_API = (
     "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"

@@ -41,13 +41,13 @@ from collections import defaultdict
 # 不會即時顯示。
 sys.stdout.reconfigure(line_buffering=True)
 
-from fetch_wikidata_pivots import find_stable_control_pivot, get_wikipedia_title, fetch_pageviews
-from openrouter_client import call_model
-from run_free_exploration_batch import (
+from legacy.fetch_wikidata_pivots import fetch_pageviews, find_stable_control_pivot, get_wikipedia_title
+from legacy.run_free_exploration_batch import (
     load_completed_explorations, run_case_model, write_hit_rate_csv,
     build_dryrun_fixtures, make_plain_mock_call_model,
 )
-from wikidata_graph_backend import WikidataGraphBackend
+from legacy.wikidata_graph_backend import WikidataGraphBackend
+from tkg.api.openrouter import call_model
 
 
 def resolve_control_pivot(backend, case: dict, conflict_position_label: str,
@@ -118,7 +118,7 @@ def main():
     models = [m.strip() for m in args.models.split(",") if m.strip()]
 
     if args.dry_run:
-        import run_experiment
+        from legacy import run_experiment
         cases, backend, walker_factory = build_dryrun_fixtures()
         args.distractors = ["mock distractor question 1?", "mock distractor question 2?"]
         plain_mock = make_plain_mock_call_model()

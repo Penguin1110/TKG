@@ -36,7 +36,7 @@ prompt 由呼叫端（run_free_exploration_batch.py）傳入，這裡不寫死�
 
 import json
 
-from openrouter_client import call_model_with_tools, OpenRouterError
+from tkg.api.openrouter import OpenRouterError, call_model_with_tools
 
 MAX_NEIGHBORS_SHOWN = 20  # 真實 Wikidata 節點的鄰居可能有上百個，全部列出會爆 token，這裡設實務上限
 MAX_FACTS_SHOWN = 30      # 同理，view_current_node() 也設上限

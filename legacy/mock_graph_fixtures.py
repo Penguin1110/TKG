@@ -14,8 +14,8 @@ MockGraphBackend 刻意只實作 fetch_node()，bfs_distance()/find_nodes_at_dis
 測試驗證的才是真正在跑的 BFS 邏輯，不是另一套巧合看起來正確的邏輯。
 """
 
-from wikidata_graph_backend import bfs_distance as _bfs_distance
-from wikidata_graph_backend import find_nodes_at_distance as _find_nodes_at_distance
+from legacy.wikidata_graph_backend import bfs_distance as _bfs_distance
+from legacy.wikidata_graph_backend import find_nodes_at_distance as _find_nodes_at_distance
 
 PIVOT_QID = "MOCKPIVOT"
 

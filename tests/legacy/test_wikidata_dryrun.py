@@ -14,16 +14,22 @@ test_free_exploration_dryrun.py
   7. offline_only=True 時，快取沒有的 qid 會直接報錯，不會悄悄打真的 API
 
 執行：
-    python3 test_free_exploration_dryrun.py
+    uv run python -m tests.legacy.test_wikidata_dryrun
 """
 
 import json
 import os
 import sqlite3
 
-from mock_graph_fixtures import MockGraphBackend, build_mock_graph, build_cyclic_graph, build_mock_case, PIVOT_QID
-from graph_exploration_agent import run_free_exploration
-from run_free_exploration_batch import check_pivot_leak, find_pre_seen_ripple_distances
+from legacy.graph_exploration_agent import run_free_exploration
+from legacy.mock_graph_fixtures import (
+    PIVOT_QID,
+    MockGraphBackend,
+    build_cyclic_graph,
+    build_mock_case,
+    build_mock_graph,
+)
+from legacy.run_free_exploration_batch import check_pivot_leak, find_pre_seen_ripple_distances
 
 
 # ---------- 1. bfs_distance / find_nodes_at_distance ----------
@@ -140,8 +146,7 @@ def test_miss_detection_and_not_sent_to_line_b():
     # 用 run_free_exploration_batch 的批次邏輯驗證：miss 的話 hit_counts 有記錄，
     # 但不會呼叫 run_round_schedule()（用一個會直接 raise 的假 run_round_schedule
     # 偵測「有沒有被呼叫」，miss 的情況下不該被呼叫到）
-    import run_free_exploration_batch as batch
-    import run_experiment
+    from legacy import run_free_exploration_batch as batch
 
     original_run_round_schedule = batch.run_round_schedule
     called = {"n": 0}
@@ -208,7 +213,7 @@ def test_leak_check_only_pivot_node():
 # ---------- 6. branch_cap 限制熱門節點的展開數 ----------
 
 def test_branch_cap_limits_fanout():
-    from wikidata_graph_backend import bfs_frontier
+    from legacy.wikidata_graph_backend import bfs_frontier
 
     graph = {"HUB": {"qid": "HUB", "label": "hub", "facts": [],
                        "neighbors": [{"qid": f"N{i}", "label": f"N{i}", "property": "rel"}
@@ -232,7 +237,7 @@ def test_branch_cap_limits_fanout():
 # ---------- 7. offline_only 擋下快取沒有的 qid ----------
 
 def test_offline_only_blocks_uncached_qid():
-    from wikidata_graph_backend import WikidataGraphBackend, WikidataError
+    from legacy.wikidata_graph_backend import WikidataGraphBackend, WikidataError
 
     cache_path = "test_offline_cache_tmp.db"
     if os.path.exists(cache_path):

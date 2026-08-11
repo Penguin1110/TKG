@@ -1,5 +1,6 @@
 {
   "_schema_notes": "ripples/control 都以「距離」為 key（\"1\"/\"2\"/\"3\"），每個距離下是候選事實的 list。distance 1/2/3 目前都用 WebSearch 查證過真實新聞/官方來源才填入（新聞連結見對話記錄，沒有編造任何事實）；bestbuy_ceo 的 distance 3（Jason Bonfig 空出的 Chief Customer, Product and Fulfillment Officer 一職由誰接任）截至查證當下官方還沒公布繼任者，所以刻意留空陣列，而不是編造答案。design doc 建議每距離備 2-3 個候選，目前多數距離仍只有 1 個，擴充時比照現有格式新增元素即可。round schedule 只會抽「非空」的距離，因此留空陣列可以安全先跑 pilot。11 個案例涵蓋政治(4)/企業(3)/金融(1)/體育(3)，fed_chair、manutd_coach、france_coach、uk_pm、realmadrid_coach、disney_ceo 是後來補的，graph_walk 從一開始寫就沒有洩漏 ripple 答案（吸取了前面版本的教訓，寫資料時已用關鍵字掃描驗證過）。graph_walk（conflict arm）/control_graph_walk（control arm）是 Line A + Line B 合併版的曝光機制：劇本式的 5 步節點瀏覽（不用 OpenRouter tool-calling，純文字模擬），每一步的 facts 都跟同一個 case 的 ripples/control 事實對應，帶 as_of 時間戳；模型在每一步的自由文字回覆會被記錄，但不影響下一步顯示哪個節點（刻意排除「模型導航能力」這個干擾變數，只保留「曝光後會不會反悔」這個變數）。exposure_snippet 欄位保留做為人類查證來源，程式已改用 graph_walk，不再使用 exposure_snippet。",
+  "_wikipedia_schema_notes": "新版正式流程使用 wikipedia_title/control_wikipedia_title 作為頁面 pivot，Wikipedia revision 是節點、正文 hyperlink 是有方向的 edge。pivot_qid、graph_walk、control_graph_walk 與 exposure_snippet 僅為舊結果重現而保留。所有 ripples/control 候選仍須通過 runtime 的 LLM answerability gate，不能只因為寫在 cases.json 就進分析。",
   "distractor_questions": [
     "What is the chemical symbol for gold?",
     "What is the capital of Japan?",
@@ -14,6 +15,9 @@
     {
       "id": "portugal_first_lady",
       "category": "politics",
+      "wikipedia_title": "António José Seguro",
+      "control_wikipedia_title": "Portugal",
+      "wikipedia_as_of": "2026-03-10",
       "pivot_qid": "Q1580316",
       "_pivot_qid_note": "António José Seguro（總統本人，不是 First Lady 的職位實體）。查證過『First Lady of Portugal』的職位實體本身（Q18464230，instance of: position）沒有可查詢的 officeholder/current-holder claim——First Lady 在葡萄牙不是正式憲政職位，Wikidata 沒有用『組織持有職位』的方式建模它。改用 Seguro 自己的條目繞過這個限制：Q1580316 有一條乾淨的 'spouse: Margarida Maldonado Freitas' claim（雖然沒有 P580/P582 時間戳，但也沒有結束時間，過 current_only 篩選會保留），跟本案 new_answer_keywords 完全對上。**曾經有的洩漏問題已修好**：一開始 check_pivot_leak() 驗到 distance-3 被判成洩漏——命中的是 Seguro 自己『position held: member of the Assembly of the Republic』這條政治生涯常態事實（他當過五屆國會議員），跟 fed_chair 踩過的坑同一類：new_keywords 裡原本有一個太籠統的單字 'member'。已改成只留 'National Association of Pharmacies'／'pharmacies association'／'pharmacy association' 這幾個更精確的片語，check_pivot_leak() 已驗證乾淨。control_pivot_candidates 還沒有整理（這個案例的 control pivot 需要找『長年沒換第一夫人／穩定婚姻』的國家元首，跟其他案例用『長年沒換職位持有人』的邏輯不同，還需要另外設計篩選條件，留待下一輪）。",
       "pk_question": "Who is the current First Lady of Portugal?",
@@ -119,7 +123,10 @@
     {
       "id": "honduras_first_lady",
       "category": "politics",
-      "_pivot_qid_note": "沒有標 pivot_qid，選項B（自由探索）目前跑不了這個 case。查證過 Wikidata 上『First Lady of Honduras』有一個位置實體（Q6570926，instance of: position/title），但一樣沒有可查詢的 officeholder/current-holder claim，跟 portugal_first_lady 是同一類限制（First Lady 類角色在 Wikidata 上普遍沒有用『組織持有職位』的方式建模，見該案例的說明）。",
+      "wikipedia_title": "Nasry Asfura",
+      "control_wikipedia_title": "Honduras",
+      "wikipedia_as_of": "2026-01-28",
+      "_pivot_qid_note": "沒有標 pivot_qid，因此舊版 Wikidata 自由探索跑不了；新版 Wikipedia hyperlink 流程改用 wikipedia_title，可以跑這個 case。Wikidata 上『First Lady of Honduras』的位置實體（Q6570926）沒有可查詢的 officeholder/current-holder claim。",
       "pk_question": "Who is the current First Lady or First Gentleman of Honduras?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Manuel Zelaya", "Xiomara Castro", "first gentleman"],
@@ -214,6 +221,9 @@
     {
       "id": "apple_ceo",
       "category": "corporate",
+      "wikipedia_title": "Apple Inc.",
+      "control_wikipedia_title": "Apple Inc.",
+      "wikipedia_as_of": "2026-09-02",
       "pivot_qid": "Q312",
       "control_pivot_candidates": ["Q2283", "Q182477", "Q380", "Q3884"],
       "control_position_property_label": "chief executive officer",
@@ -312,7 +322,10 @@
     {
       "id": "bestbuy_ceo",
       "category": "corporate",
-      "_pivot_qid_note": "沒有標 pivot_qid，選項B（自由探索）目前跑不了這個 case。查證過 Best Buy 的 Wikidata 條目（Q533415），chief executive officer claim 只有 'Hubert Joly'（沒有任何時間戳，且 Hubert Joly 早在 2019 年就卸任，比本案的 old_answer_keywords Corie Barry 還早一任）——Wikidata 上這個條目沒有跟上真實世界的異動，不是程式能解決的問題，寧可不設 pivot_qid 也不要用一個已知過時的節點硬跑。等 Wikidata 條目更新後可以重新查證。",
+      "wikipedia_title": "Best Buy",
+      "control_wikipedia_title": "Best Buy",
+      "wikipedia_as_of": "2026-11-01",
+      "_pivot_qid_note": "沒有標 pivot_qid，因此舊版 Wikidata 自由探索跑不了；新版 Wikipedia hyperlink 流程改用 wikipedia_title，可以跑這個 case。Wikidata 的 Best Buy 條目（Q533415）CEO claim 已知過時，因此不應再拿它當新版資料來源。",
       "pk_question": "Who is the CEO of Best Buy?",
       "pk_threshold": 0.8,
       "old_answer_keywords": ["Corie Barry"],
@@ -390,6 +403,9 @@
     {
       "id": "peru_president",
       "category": "politics",
+      "wikipedia_title": "Peru",
+      "control_wikipedia_title": "Peru",
+      "wikipedia_as_of": "2026-07-29",
       "pivot_qid": "Q419",
       "control_pivot_candidates": ["Q34", "Q17", "Q20"],
       "control_position_property_label": "head of state",
@@ -487,6 +503,9 @@
     {
       "id": "fed_chair",
       "category": "finance",
+      "wikipedia_title": "Federal Reserve",
+      "control_wikipedia_title": "Federal Reserve",
+      "wikipedia_as_of": "2026-05-23",
       "pivot_qid": "Q53536",
       "control_pivot_candidates": ["Q8901", "Q333101", "Q183231"],
       "control_position_property_label": "chairperson",
@@ -584,6 +603,9 @@
     {
       "id": "manutd_coach",
       "category": "sports",
+      "wikipedia_title": "Manchester United F.C.",
+      "control_wikipedia_title": "Manchester United F.C.",
+      "wikipedia_as_of": "2026-06-01",
       "pivot_qid": "Q18656",
       "control_pivot_candidates": ["Q8701", "Q15789", "Q1130849"],
       "control_position_property_label": "head coach",
@@ -681,6 +703,9 @@
     {
       "id": "france_coach",
       "category": "sports",
+      "wikipedia_title": "France national football team",
+      "control_wikipedia_title": "France national football team",
+      "wikipedia_as_of": "2026-07-29",
       "pivot_qid": "Q47774",
       "_pivot_qid_note": "France men's national association football team。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：Q47774 的 head coach claims 完整帶時間戳，現任 'Zinedine Zidane（2026-07-28 ~ 至今）'，跟本案 new_answer_keywords 完全對上；Zidane 自己的條目（Q1835）也有對應的 'coach of sports team: France men's national association football team（2026-07-28 ~ 至今）' 反向 claim，雙向都查得到。已用 check_pivot_leak() 驗證過乾淨（ripple 用到的 Real Madrid／四年合約／三座歐冠都不在 pivot 節點『現在仍然有效』的 facts 裡——Zidane 執教 Real Madrid 的兩段任期都已結束，帶 P582 結束時間，被 current_only 過濾掉了）。這個節點的 claims 總數很大（387 條，跟 apple_ceo 的 Q312 是同一類熱門節點：一堆社群帳號、歷屆賽事參賽紀錄、歷史排名），head coach 因為帶時間戳，經過 `_render_node()` 的排序邏輯會排到前面，不會被淹沒。control_pivot_candidates 還沒有整理。",
       "pk_question": "Who is the current head coach of the France national football team?",
@@ -776,6 +801,9 @@
     {
       "id": "uk_pm",
       "category": "politics",
+      "wikipedia_title": "Prime Minister of the United Kingdom",
+      "control_wikipedia_title": "Prime Minister of the United Kingdom",
+      "wikipedia_as_of": "2026-07-21",
       "pivot_qid": "Q14211",
       "_pivot_qid_note": "Prime Minister of the United Kingdom（職位實體，不是 United Kingdom 國家實體 Q145——Q145 有 1014 條 facts，太密集，職位實體乾淨很多，只有 47 條）。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：position holder claim 直接是 'Andy Burnham（2026-07-20 ~ 至今）'，跟本案 new_answer_keywords 完全對上。已用 check_pivot_leak() 驗證過乾淨（ripple 用到的 Greater Manchester／John Healey／Ed Miliband 都不在這個職位實體的 facts 裡——這些是 Burnham 個人生涯或他組閣後的內閣人事，不會出現在『首相』這個職位本身的 claims 上，天生就跟 pivot 節點不會有重疊，這個案例的 pivot/ripple 分離比其他案例更乾淨）。control_pivot_candidates 還沒有整理。",
       "pk_question": "Who is the current Prime Minister of the United Kingdom?",
@@ -871,6 +899,9 @@
     {
       "id": "realmadrid_coach",
       "category": "sports",
+      "wikipedia_title": "Real Madrid CF",
+      "control_wikipedia_title": "Real Madrid CF",
+      "wikipedia_as_of": "2026-06-12",
       "pivot_qid": "Q8682",
       "_pivot_qid_note": "Real Madrid Club de Fútbol。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：head coach claims 完整記錄了近期連續三次換帥（Xabi Alonso 2025-05-25~2026-01-12 → Álvaro Arbeloa 2026-01-13~2026 → José Mourinho 2026~至今），跟 Man Utd 的 Amorim/Fletcher/Carrick 是同一類「短期過渡多次換人」模式，current_only 過濾後只留 Mourinho 這條現在有效的 claim，乾淨。old_answer_keywords 涵蓋 Ancelotti（2021-2025 長期在任，大部分模型訓練時的先驗）跟 Xabi Alonso（更新的模型可能知道），呼應 manutd_coach 處理 ten Hag/Amorim 雙重先驗的做法。**曾經有的洩漏問題已修好**：一開始想拿『Florentino Pérez 剛連任俱樂部主席』當 distance-3，被 check_pivot_leak() 抓到洩漏——因為主席是俱樂部常態性職位，Q8682 本身就有一條現在有效的『president: Florentino Pérez』claim，跟 fed_chair/portugal_first_lady 是同一類『pivot 節點本身的結構性職位資訊意外命中 ripple』的坑。換成跟 Mourinho 個人生涯有關、完全不依賴 Real Madrid 這個節點資料的事實（他在 Chelsea 拿過的英超冠軍數）之後就乾淨了。control_pivot_candidates 還沒有整理。",
       "pk_question": "Who is the current head coach of Real Madrid?",
@@ -966,6 +997,9 @@
     {
       "id": "disney_ceo",
       "category": "corporate",
+      "wikipedia_title": "The Walt Disney Company",
+      "control_wikipedia_title": "The Walt Disney Company",
+      "wikipedia_as_of": "2026-03-19",
       "pivot_qid": "Q7414",
       "_pivot_qid_note": "The Walt Disney Company。已用 wikidata_graph_backend.py 對真實 Wikidata 做過 live 驗證：CEO claims 完整記錄了公司從 1923 年至今每一任 CEO，一路到 'Josh D'Amaro（2026 ~ 至今）'，跟本案 new_answer_keywords 完全對上，是查證過的案例裡歷史記錄最完整的一個。**曾經有的洩漏問題已修好**：一開始想拿『D'Amaro 卸任前的職位是 Disney Experiences 主管』當 distance-1，被 check_pivot_leak() 抓到洩漏——因為 Disney Experiences 是公司常態性的事業群，Q7414 本身就有一條現在有效的『owner of / has part: Disney Experiences』類 claim，是結構性資訊、不是新聞事件才有的。換成 Bob Iger 卸任後的過渡性職位（Senior Advisor，這種臨時頭銜不會被寫進公司的常態性 claims）之後就乾淨了。control_pivot_candidates 還沒有整理。",
       "pk_question": "Who is the current CEO of The Walt Disney Company?",

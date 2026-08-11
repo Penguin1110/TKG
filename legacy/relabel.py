@@ -9,13 +9,13 @@ API、存好的原始回應（response 欄位）重新分類一次，不用再�
 用這個腳本重新產生正確的 label，而不必整組實驗重跑。
 
 執行：
-    python3 relabel.py --input results.jsonl --output results_relabeled.jsonl
+    uv run python -m legacy.relabel --input results.jsonl --output results_relabeled.jsonl
 """
 
 import argparse
 import json
 
-from judge import classify, classify_single
+from legacy.judge import classify, classify_single
 
 
 def build_lookup(cases_data):

@@ -1,5 +1,5 @@
 """
-openrouter_client.py
+tkg.api.openrouter
 ---------------------
 輕量包裝 OpenRouter 的 chat completions API。
 

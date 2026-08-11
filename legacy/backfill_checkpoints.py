@@ -18,7 +18,7 @@ round_schedule、比對實際列數是否剛好對得上」的方式判斷一個
     參數，這裡也要對應改）
 
 執行：
-    python3 backfill_checkpoints.py --input results.jsonl
+    uv run python -m legacy.backfill_checkpoints --input results.jsonl
 """
 
 import argparse
@@ -26,7 +26,7 @@ import json
 import random
 from collections import defaultdict
 
-from run_experiment import build_round_schedule, available_distances, _write_checkpoint
+from legacy.run_experiment import _write_checkpoint, available_distances, build_round_schedule
 
 
 def main():

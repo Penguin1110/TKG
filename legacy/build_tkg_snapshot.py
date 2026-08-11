@@ -20,10 +20,10 @@ build_tkg_snapshot.py
 
 用法：
     # 建快照（種子 = 所有 case 的 pivot_qid + control_pivot_candidates）
-    uv run python build_tkg_snapshot.py --max-depth 3 --branch-cap 25
+    uv run python -m legacy.build_tkg_snapshot --max-depth 3 --branch-cap 25
 
     # 只驗新鮮度，不重建（比對種子節點現在 vs 快照裡的版本）
-    uv run python build_tkg_snapshot.py --verify
+    uv run python -m legacy.build_tkg_snapshot --verify
 """
 
 import argparse
@@ -31,7 +31,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from wikidata_graph_backend import WikidataGraphBackend, bfs_frontier, DEFAULT_BRANCH_CAP
+from legacy.wikidata_graph_backend import DEFAULT_BRANCH_CAP, WikidataGraphBackend, bfs_frontier
 
 DEFAULT_MANIFEST_PATH = "tkg_snapshot_manifest.json"
 

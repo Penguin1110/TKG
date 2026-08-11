@@ -9,6 +9,8 @@ venv/
 
 # local Wikidata API cache (regenerable, can be large)
 tkg_cache*.db
+wikipedia_snapshot*.db
+.tkg_visualization/
 
 # dry-run / checkpoint test outputs (test_dryrun.py)
 dryrun_results.jsonl

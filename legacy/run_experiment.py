@@ -44,8 +44,8 @@ from datetime import datetime, timezone
 # 不會即時顯示、看起來像卡住了。
 sys.stdout.reconfigure(line_buffering=True)
 
-from openrouter_client import call_model, OpenRouterError
-from judge import classify, classify_single
+from legacy.judge import classify, classify_single
+from tkg.api.openrouter import OpenRouterError, call_model
 
 
 def build_round_schedule(distances: list, n_rounds: int, distractor_every: int, rng: random.Random) -> list:

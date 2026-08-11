@@ -1,5 +1,5 @@
 """
-wikidata_graph_backend.py
+legacy.wikidata_graph_backend
 --------------------------
 把 Wikidata 包裝成一個可以被 agent 逐步探索的圖，供 graph_exploration_agent.py
 使用。用 wbgetentities 抓單一節點的 claims，轉成人類可讀的 facts（帶
@@ -29,7 +29,6 @@ cases.json 裡幾個案例的 _pivot_qid_note。時間戳本身仍然保留在�
 """
 
 import json
-import os
 import sqlite3
 import time
 from datetime import datetime, timezone

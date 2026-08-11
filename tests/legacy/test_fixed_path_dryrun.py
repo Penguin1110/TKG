@@ -16,15 +16,14 @@ control arm / distance interleave / bootstrap 分析 / 五步劇本式圖探索�
   2. 之後若修改 run_experiment.py / judge.py / analyze.py，也可以先跑這個回歸測試
 
 執行：
-    python3 test_dryrun.py
+    uv run python -m tests.legacy.test_fixed_path_dryrun
 """
 import json
 import os
 import random
 
-import openrouter_client
-import run_experiment
-import analyze
+from legacy import analyze, run_experiment
+from tkg.api import openrouter as openrouter_client
 
 CALL_COUNT = {"n": 0}
 CONTROL_QUESTIONS = set()

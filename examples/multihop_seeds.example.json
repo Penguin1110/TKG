@@ -1,0 +1,42 @@
+{
+  "seeds": [
+    {
+      "id": "intel_cutoff_ceo_successor_founded_firm",
+      "model_id": "openai/gpt-4.1-mini",
+      "target_as_of": "2026-01-01",
+      "anchor_label": "Intel",
+      "answer_kind": "What",
+      "category": "corporate",
+      "old_answer_keywords": [],
+      "hops": [
+        {
+          "source_title": "Intel",
+          "target_title": "Pat Gelsinger",
+          "relation": "chief executive officer at cutoff",
+          "relative_clause": "the person who was chief executive officer of {source} at the tested model's registered knowledge cutoff",
+          "as_of": "2024-06-01",
+          "evidence": "Frank D. Yeary (chairman)Pat Gelsinger (CEO)",
+          "target_aliases": ["Pat Gelsinger"]
+        },
+        {
+          "source_title": "Pat Gelsinger",
+          "target_title": "Lip-Bu Tan",
+          "relation": "successor as Intel chief executive officer",
+          "relative_clause": "the person who succeeded {source} as chief executive officer of Intel",
+          "as_of": "2026-01-01",
+          "evidence": "Succeeded byLip-Bu Tan",
+          "target_aliases": ["Lip-Bu Tan"]
+        },
+        {
+          "source_title": "Lip-Bu Tan",
+          "target_title": "Walden International",
+          "relation": "venture-capital firm founded by subject",
+          "relative_clause": "the venture-capital firm founded by {source}",
+          "as_of": "2026-01-01",
+          "evidence": "Tan was a manager at EDS Nuclear and ECHO Energy and partner at the Walden USA investment fund before founding venture capital (VC) firm Walden International in 1987.",
+          "target_aliases": ["Walden International"]
+        }
+      ]
+    }
+  ]
+}

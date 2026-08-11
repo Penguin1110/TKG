@@ -42,10 +42,15 @@ from datetime import datetime, timezone
 # 這裡強制轉成一行一行 flush，不管在哪種執行環境下都能即時看到進度。
 sys.stdout.reconfigure(line_buffering=True)
 
-from graph_exploration_agent import run_free_exploration
-from openrouter_client import call_model, OpenRouterError
-from run_experiment import build_round_schedule, run_round_schedule, run_pk_probe, available_distances
-from wikidata_graph_backend import WikidataGraphBackend, bfs_frontier
+from legacy.graph_exploration_agent import run_free_exploration
+from legacy.run_experiment import (
+    available_distances,
+    build_round_schedule,
+    run_pk_probe,
+    run_round_schedule,
+)
+from legacy.wikidata_graph_backend import WikidataGraphBackend, bfs_frontier
+from tkg.api.openrouter import OpenRouterError, call_model
 
 NEUTRAL_TASK_PROMPT_TEMPLATE = (
     "You are browsing a knowledge graph. You can use tools to view the current "
@@ -450,7 +455,7 @@ def main():
     models = [m.strip() for m in args.models.split(",") if m.strip()]
 
     if args.dry_run:
-        import run_experiment
+        from legacy import run_experiment
         cases, backend, walker_factory = build_dryrun_fixtures()
         args.distractors = ["mock distractor question 1?", "mock distractor question 2?"]
         plain_mock = make_plain_mock_call_model()
@@ -498,7 +503,7 @@ def build_dryrun_fixtures():
     走到 pivot」的機率明顯高於「距離 3 的起點」——這是驗收標準要求的
     「距離1命中率應該高於距離3」的結構性保證，不是碰運氣。
     """
-    from mock_graph_fixtures import MockGraphBackend, build_mock_graph, build_mock_case
+    from legacy.mock_graph_fixtures import MockGraphBackend, build_mock_graph, build_mock_case
 
     graph = build_mock_graph()
     backend = MockGraphBackend(graph)

@@ -1,12 +1,91 @@
 [project]
-name = "tkg-prior-reversion-pilot"
-version = "0.2.0"
-description = "TKG Prior-Reversion Pilot: does an LLM revert to a stale prior across multi-turn reasoning after being exposed to an updated fact?"
+name = "tkg-temporal-wikipedia-explorer"
+version = "0.11.0"
+description = "PK-admitted cutoff-relative multi-hop navigation over Wikipedia revisions"
+readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+    "llm",
+    "temporal-knowledge",
+    "wikipedia",
+    "graph-navigation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Penguin1110/TKG"
+Repository = "https://github.com/Penguin1110/TKG.git"
+Issues = "https://github.com/Penguin1110/TKG/issues"
+
+[project.scripts]
+tkg-generate-cases = "tkg.experiment.question_generation:main"
+tkg-generate-multihop = "tkg.experiment.multihop_generation:main"
+tkg-run = "tkg.experiment.temporal_runner:main"
+tkg-snapshot = "tkg.wikipedia.snapshot:main"
+tkg-validate-cases = "tkg.experiment.case_validation:main"
+tkg-validate-judge = "tkg.judging.validation:main"
+tkg-visualize = "tkg.visualization.server:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11,<2",
+    "pyflakes>=3.2,<4",
+    "pytest>=8.3,<10",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
 [tool.uv]
-package = false
+default-groups = ["dev"]
+package = true
+
+[tool.uv.workspace]
+members = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tkg"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.env.example",
+    "/README.md",
+    "/examples",
+    "/judge_gold.example.jsonl",
+    "/legacy",
+    "/pyproject.toml",
+    "/src",
+    "/tests",
+    "/uv.lock",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/tkg"]
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+show_error_codes = true
