@@ -39,6 +39,11 @@ import random
 import sys
 from datetime import datetime, timezone
 
+# 見 run_free_exploration_batch.py 的同一行說明：強制 stdout 一行一行 flush，
+# 避免 uv run 之類的包裝工具把 stdout 變成整塊緩衝，導致進度訊息卡在緩衝區
+# 不會即時顯示、看起來像卡住了。
+sys.stdout.reconfigure(line_buffering=True)
+
 from openrouter_client import call_model, OpenRouterError
 from judge import classify, classify_single
 

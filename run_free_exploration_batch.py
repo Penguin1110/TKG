@@ -36,25 +36,56 @@ import random
 import sys
 from datetime import datetime, timezone
 
+# uv run 之類的包裝工具會讓子行程的 stdout 變成 pipe，不是真的 tty，Python
+# 偵測到不是 tty 就會切成整塊緩衝（block buffering）——print() 呼叫的內容
+# 會一直卡在緩衝區裡，不會即時顯示，看起來就像整個程式卡住了（實測發生過）。
+# 這裡強制轉成一行一行 flush，不管在哪種執行環境下都能即時看到進度。
+sys.stdout.reconfigure(line_buffering=True)
+
 from graph_exploration_agent import run_free_exploration
 from openrouter_client import call_model, OpenRouterError
 from run_experiment import build_round_schedule, run_round_schedule, run_pk_probe, available_distances
-from wikidata_graph_backend import WikidataGraphBackend
+from wikidata_graph_backend import WikidataGraphBackend, bfs_frontier
 
 NEUTRAL_TASK_PROMPT_TEMPLATE = (
-    "你正在瀏覽一個知識圖譜。你可以使用工具查看目前節點的資訊、列出相鄰節點、"
-    "移動到任何一個相鄰節點，或是覺得逛得差不多了就結束探索。看看你覺得有趣的"
-    "資訊，最多可以走 {max_steps} 步。"
+    "You are browsing a knowledge graph. You can use tools to view the current "
+    "node's information, list its neighboring nodes, move to any neighboring "
+    "node, or end the exploration whenever you feel you've seen enough. Look "
+    "around for anything you find interesting. You may take at most {max_steps} "
+    "steps.\n\n"
+    "Important: this is a fully automated process — there is no human on the "
+    "other end reading your messages or replying to you. Each turn, you must "
+    "call a tool to keep acting. Do not describe what you see in plain text, "
+    "and do not ask what to do next or wait for confirmation — decide for "
+    "yourself what to do and just call the corresponding tool. Only call "
+    "stop_exploring() when you genuinely want to end the exploration."
 )
 # 注意：這個 prompt 刻意寫成中性、探索導向，不能改成任何暗示「往哪個方向走」
 # 的文字（例如提到 case 的主題、公司名、職位名）。一旦暗示，就不再是「碰巧
 # 路過」，整個自然命中率的量測就沒有意義了。
+#
+# 踩過的坑（第一次大規模跑之前的小規模驗證發現）：
+#   1. 拿掉「這是全自動流程、不用反問」這段之前，gpt-4.1-mini 常常在看完一個
+#      節點的內容後，不呼叫任何工具，反而用文字描述剛剛看到什麼、然後反問
+#      「你想看哪個？」——這其實是它把這個任務當成一般對話在回應，以為有
+#      真人會回覆。因為沒有真人接話，run_free_exploration() 判定成
+#      no_tool_call 提早結束探索，實測占了將近一半的失敗案例，直接拖累命中率、
+#      浪費大量 API 額度在 2-3 步就中止的短軌跡上。
+#   2. 整個探索過程（這個 prompt、下面的 TRANSITION_PROMPT、
+#      graph_exploration_agent.py 裡所有工具描述跟回傳訊息）原本是中文寫的，
+#      Line B 的 ripple/control 問題則是英文——實測發現模型因為前面大量中文
+#      context，Line B 常常整段用中文回答，導致 judge.py 全英文的關鍵字／
+#      hedge 判斷完全比對不到，一大堆回應被誤判成 "other"（明明內容看得出來
+#      是先驗反悔或正確回答，只是judge抓不到）。改成整個探索過程、轉場訊息、
+#      工具描述都用英文之後，跟 Line B 的英文問題語言一致，才解決。
 
 TRANSITION_PROMPT = (
-    "你的探索已經結束，探索工具已經不能用了。接下來我會直接問你幾個問題，"
-    "請盡你所知回答——不是只能用你剛剛在圖上親眼看到的內容，你自己原本就"
-    "知道的任何相關知識都可以拿來回答，不確定的話也可以用推論或最佳猜測，"
-    "不用堅持一定要在圖上親眼查過才敢回答。"
+    "Your exploration has ended and the exploration tools are no longer "
+    "available. I'm now going to ask you a few questions directly — please "
+    "answer using everything you know, not only what you personally saw while "
+    "exploring the graph. You can also draw on your own prior knowledge, "
+    "inference, or your best guess if you're not certain. You don't need to "
+    "have seen something in the graph to answer it."
 )
 # 踩過的坑 1（第一次真的跑）：探索階段是 tool-calling（call_model_with_tools），
 # Line B 的追問是純文字（call_model()，不帶 tools 參數）。如果直接把探索結束時
@@ -321,8 +352,14 @@ def run_case_model(case, model, backend, args, log_fh, completed, rng, hit_count
         explore_backend = build_restricted_backend(backend, pivot_qid, args.restrict_subgraph_k)
 
     distances = [int(d) for d in args.distances.split(",") if d.strip()]
+    # 一次把 BFS 展開到 max(distances)，再從同一份 frontier 切各個距離的候選池，
+    # 不要對每個距離各自呼叫 find_nodes_at_distance()——那樣每次都會重新展開到
+    # max(distances) 深度，雖然有 sqlite 快取讓後面幾次變快，但仍然是三倍重工，
+    # 也會讓 bfs 進度訊息重複印三次，徒增困惑。
+    print(f"[explore] case={case_id} arm={arm} 開始找候選起點池（distances={distances}）...")
+    frontier = bfs_frontier(explore_backend.fetch_node, pivot_qid, max(distances))
     for distance in distances:
-        candidates = backend.find_nodes_at_distance(pivot_qid, distance, max_depth=max(distances))
+        candidates = frontier.get(distance, [])
         if not candidates:
             print(f"[warn] case={case_id} arm={arm} distance={distance} 找不到候選起點，跳過這個距離")
             continue
@@ -340,6 +377,8 @@ def run_case_model(case, model, backend, args, log_fh, completed, rng, hit_count
                     hit_counts[(model, case_id, arm, distance)]["from_checkpoint"] += 1
                     continue
 
+                print(f"=== case={case_id} model={model} arm={arm} distance={distance} "
+                      f"start={start_qid} repeat={repeat_idx} ===")
                 call_model_fn = walker_factory(explore_backend, start_qid, rng) if walker_factory else None
                 result = run_one_exploration(
                     model, explore_backend, start_qid, pivot_qid, args.max_steps,

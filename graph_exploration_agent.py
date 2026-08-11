@@ -44,26 +44,27 @@ MAX_FACTS_SHOWN = 30      # 同理，view_current_node() 也設上限
 TOOLS = [
     {"type": "function", "function": {
         "name": "list_neighbors",
-        "description": "列出目前所在節點可以移動過去的所有相鄰節點。",
+        "description": "List all neighboring nodes you can move to from the current node.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
         "name": "view_current_node",
-        "description": "查看目前所在節點的詳細資訊（已知的事實列表）。",
+        "description": "View detailed information about the current node (its known facts).",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
         "name": "move_to",
-        "description": "移動到指定的相鄰節點。neighbor_id 必須是 list_neighbors() 回傳過的節點 id。",
+        "description": "Move to the specified neighboring node. neighbor_id must be a node id "
+                       "previously returned by list_neighbors().",
         "parameters": {
             "type": "object",
-            "properties": {"neighbor_id": {"type": "string", "description": "要移動過去的節點 id"}},
+            "properties": {"neighbor_id": {"type": "string", "description": "The id of the node to move to"}},
             "required": ["neighbor_id"],
         },
     }},
     {"type": "function", "function": {
         "name": "stop_exploring",
-        "description": "結束這趟探索，不再繼續移動到其他節點。",
+        "description": "End this exploration session; stop moving to other nodes.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
 ]
@@ -71,33 +72,39 @@ TOOLS = [
 
 def _format_neighbors(neighbors: list, visited: set) -> str:
     if not neighbors:
-        return "（目前節點沒有可移動的相鄰節點）"
+        return "(This node has no outgoing neighbors.)"
     shown = neighbors[:MAX_NEIGHBORS_SHOWN]
     lines = []
     for nb in shown:
-        tag = "（已訪問）" if nb["qid"] in visited else ""
-        lines.append(f"- id={nb['qid']}｜{nb['label']}｜關係：{nb['property']}{tag}")
+        tag = " (visited)" if nb["qid"] in visited else ""
+        lines.append(f"- id={nb['qid']} | {nb['label']} | relation: {nb['property']}{tag}")
     truncated_note = ""
     if len(neighbors) > MAX_NEIGHBORS_SHOWN:
-        truncated_note = f"\n（這個節點其實有 {len(neighbors)} 個相鄰節點，這裡只列出前 {MAX_NEIGHBORS_SHOWN} 個）"
+        truncated_note = f"\n(This node actually has {len(neighbors)} neighbors; only the first {MAX_NEIGHBORS_SHOWN} are shown.)"
     return "\n".join(lines) + truncated_note
 
 
 def _format_facts(facts: list) -> str:
     if not facts:
-        return "（目前節點沒有已知的事實）"
+        return "(No known facts for this node.)"
     shown = facts[:MAX_FACTS_SHOWN]
-    note = f"\n（總共有 {len(facts)} 條事實，這裡只列出前 {MAX_FACTS_SHOWN} 條）" if len(facts) > MAX_FACTS_SHOWN else ""
+    note = f"\n(There are {len(facts)} facts in total; only the first {MAX_FACTS_SHOWN} are shown.)" if len(facts) > MAX_FACTS_SHOWN else ""
     return "\n".join(f"- {f}" for f in shown) + note
 
 
 def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
                           task_prompt: str, target_qid: str = None,
                           temperature: float = 0.7,
-                          call_model_fn=call_model_with_tools) -> dict:
+                          call_model_fn=call_model_with_tools,
+                          verbose: bool = True) -> dict:
     """
     跑一趟自由探索。backend 只要有 fetch_node(qid) -> {"qid","label","facts","neighbors"}
     這個介面就行（WikidataGraphBackend 或測試用的 MockGraphBackend 都可以）。
+
+    verbose=True（預設）會逐步印出每一步呼叫了哪個工具、結果摘要——真的打
+    Wikidata/OpenRouter 時，單一趟探索可能要跑到 max_steps 步，中間完全沒有
+    輸出會讓人以為程式卡住了（實測發生過），所以預設開著；測試/dry-run 場景
+    輸出多幾行也無傷大雅，不需要另外關掉。
 
     回傳：
         {
@@ -116,17 +123,26 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
 
     messages = [
         {"role": "system", "content": task_prompt},
-        {"role": "user", "content": "開始探索。你可以使用工具查看目前節點、列出鄰居、移動過去，或結束探索。"},
+        {"role": "user", "content": "Start exploring. You can use tools to view the current node, "
+                                      "list its neighbors, move to a neighbor, or end the exploration."},
     ]
+
+    def _log(msg):
+        if verbose:
+            print(msg)
+
+    _log(f"[explore] 開始，起點={start_qid}，最多 {max_steps} 步")
 
     stop_reason = "max_steps"
     for step in range(1, max_steps + 1):
+        _log(f"[explore step {step}/{max_steps}] 目前在 {current_qid}，等待模型回應...")
         try:
             assistant_msg = call_model_fn(model, messages, TOOLS, temperature=temperature)
         except OpenRouterError as e:
             trajectory.append({"step": step, "from_qid": current_qid, "action": "error",
                                 "args": {}, "free_text": None, "result": str(e)})
             stop_reason = "error"
+            _log(f"[explore step {step}] 呼叫失敗：{e}")
             break
 
         messages.append(assistant_msg)
@@ -137,6 +153,7 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
             trajectory.append({"step": step, "from_qid": current_qid, "action": "no_tool_call",
                                 "args": {}, "free_text": free_text, "result": ""})
             stop_reason = "no_tool_call"
+            _log(f"[explore step {step}] 模型沒有呼叫任何工具，視為結束探索")
             break
 
         stopped_this_step = False
@@ -160,7 +177,7 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
                 neighbor_id = args.get("neighbor_id")
                 valid_ids = {nb["qid"] for nb in node["neighbors"]}
                 if neighbor_id not in valid_ids:
-                    result = f"錯誤：{neighbor_id} 不是目前節點的相鄰節點，請重新選擇。"
+                    result = f"Error: {neighbor_id} is not a neighbor of the current node. Please choose again."
                 else:
                     current_qid = neighbor_id
                     visited.add(neighbor_id)
@@ -172,28 +189,37 @@ def run_free_exploration(model: str, backend, start_qid: str, max_steps: int,
                     # hit、直接進 Line B——測到的其實是「模型根本沒被曝光」，不是先驗
                     # 反悔。真的曝光需要模型親眼看過內容，不是單純路徑上經過而已。
                     dest_node = backend.fetch_node(neighbor_id)
-                    result = (f"已移動到「{dest_node['label']}」（{neighbor_id}）。目前已知：\n"
+                    result = (f"Moved to \"{dest_node['label']}\" ({neighbor_id}). Currently known:\n"
                               f"{_format_facts(dest_node['facts'])}")
                     if target_qid is not None and neighbor_id == target_qid:
                         reached_pivot_this_step = True
             elif name == "stop_exploring":
-                result = "探索結束。"
+                result = "Exploration ended."
                 stopped_this_step = True
             else:
-                result = f"錯誤：未知的工具 {name}。"
+                result = f"Error: unknown tool {name}."
 
             trajectory.append({"step": step, "from_qid": origin_qid, "action": name,
                                 "args": args, "free_text": free_text, "result": result})
             messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": result})
 
+            result_preview = result.replace("\n", " ")[:80]
+            _log(f"[explore step {step}] {name}({args if args else ''}) -> {result_preview}"
+                 f"{'...' if len(result) > 80 else ''}")
+
         if reached_pivot_this_step:
             stop_reason = "pivot_reached"
+            _log(f"[explore] 走到 pivot 節點 {target_qid} 了，停止探索、準備接上 Line B")
             break
         if stopped_this_step:
             stop_reason = "stop_exploring"
+            _log("[explore] 模型自己結束了探索")
             break
 
     hit = target_qid is not None and target_qid in visited
+    _log(f"[explore] 結束：hit={hit}, stop_reason={stop_reason}, 走了 {len(trajectory)} 步, "
+         f"最終節點={current_qid}")
+
     return {
         "start_qid": start_qid, "final_qid": current_qid, "hit": hit,
         "stop_reason": stop_reason, "visited_qids": visited_path,

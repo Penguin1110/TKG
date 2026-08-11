@@ -36,6 +36,11 @@ import random
 import sys
 from collections import defaultdict
 
+# 見 run_free_exploration_batch.py 同一行的說明：強制 stdout 一行一行 flush，
+# 避免 uv run 之類的包裝工具把 stdout 變成整塊緩衝，導致進度訊息卡在緩衝區
+# 不會即時顯示。
+sys.stdout.reconfigure(line_buffering=True)
+
 from fetch_wikidata_pivots import find_stable_control_pivot, get_wikipedia_title, fetch_pageviews
 from openrouter_client import call_model
 from run_free_exploration_batch import (

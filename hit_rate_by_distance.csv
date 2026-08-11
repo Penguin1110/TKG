@@ -1,2 +1,4 @@
 model,case_id,arm,distance,n_attempts_this_run,n_hits_this_run,hit_rate_pct_this_run,n_skipped_via_checkpoint
-openai/gpt-4.1-mini,apple_ceo,conflict,1,8,6,75.0,0
+openai/gpt-4.1-mini,apple_ceo,conflict,1,4,4,100.0,0
+openai/gpt-4.1-mini,apple_ceo,conflict,2,4,2,50.0,0
+openai/gpt-4.1-mini,apple_ceo,conflict,3,4,0,0.0,0

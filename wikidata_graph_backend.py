@@ -308,7 +308,7 @@ DEFAULT_BRANCH_CAP = 25  # 見 bfs_frontier() 的說明：沒有這個上限，�
 
 
 def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str = None,
-                  branch_cap: int = None) -> dict:
+                  branch_cap: int = None, verbose: bool = True) -> dict:
     """
     從 start_qid 做 BFS，回傳 {distance: [qid,...]}（distance 0 = start_qid 自己）。
     如果有給 target_qid，一找到就提早結束（省 API 呼叫／減少 mock 圖裡的重複走訪）。
@@ -327,17 +327,30 @@ def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str 
     只抽樣一部分起點的精神一致，不影響 pilot 的正確性，只是需要在報告裡如實
     交代取樣範圍有這層限制（跟 --restrict-subgraph-k 是同一類型的、需要誠實
     交代的工程取捨，但這裡是預設就開啟，因為完全不設上限在實務上根本跑不完）。
+
+    verbose=True（預設）會印出每個 depth 展開到第幾個節點——這一步是連續對
+    Wikidata 打 API（受 1 秒/次限速 + 429 重試影響），沒有快取的情況下光是
+    展開到 depth 3 就可能要幾十秒到幾分鐘，完全沒有輸出會讓人以為卡住了
+    （實測發生過：使用者以為是探索階段卡住，其實是根本還沒進到那一步，還在
+    這裡找候選起點池）。
     """
+    def _log(msg):
+        if verbose:
+            print(msg)
+
     cap = DEFAULT_BRANCH_CAP if branch_cap is None else branch_cap
     frontier_by_distance = {0: [start_qid]}
     visited = {start_qid}
     current_level = [start_qid]
     for depth in range(1, max_depth + 1):
         next_level = []
-        for qid in current_level:
+        _log(f"[bfs] 展開 depth {depth}（上一層有 {len(current_level)} 個節點要查）...")
+        for i, qid in enumerate(current_level, start=1):
+            _log(f"[bfs] depth {depth}: 查詢第 {i}/{len(current_level)} 個節點 {qid}...")
             try:
                 node = fetch_node_fn(qid)
-            except WikidataError:
+            except WikidataError as e:
+                _log(f"[bfs]   {qid} 查詢失敗，跳過：{e}")
                 continue
             neighbors = node["neighbors"] if cap <= 0 else node["neighbors"][:cap]
             for nb in neighbors:
@@ -348,9 +361,12 @@ def bfs_frontier(fetch_node_fn, start_qid: str, max_depth: int, target_qid: str 
                 next_level.append(nb_qid)
                 if target_qid is not None and nb_qid == target_qid:
                     frontier_by_distance[depth] = next_level
+                    _log(f"[bfs] 在 depth {depth} 找到目標 {target_qid}，提早結束")
                     return frontier_by_distance
         if not next_level:
+            _log(f"[bfs] depth {depth} 沒有新節點可以展開，提早結束")
             break
+        _log(f"[bfs] depth {depth} 完成，找到 {len(next_level)} 個新節點")
         frontier_by_distance[depth] = next_level
         current_level = next_level
     return frontier_by_distance
