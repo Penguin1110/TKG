@@ -9,8 +9,9 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 from tkg.api.openrouter import OpenRouterError, call_model
 from tkg.experiment.case_validation import validate_cases, validate_chain_route
@@ -24,7 +25,7 @@ from tkg.wikipedia.snapshot import (
 )
 
 
-CONTRACT_SCHEMA = "temporal-pk-relative-multihop-v4"
+CONTRACT_SCHEMA = "temporal-pk-relative-multihop-v7"
 
 
 def _question(case: dict) -> str:
@@ -42,7 +43,16 @@ def _case_endpoints(case: dict) -> tuple[str | None, str | None]:
     return before, after
 
 
-def _pk_prompt(case: dict, target_as_of: str | None) -> str:
+PK_PROBE_VARIANTS = (
+    "Answer with your best direct recall.",
+    "Try to retrieve the specific name before deciding that you do not know.",
+    "Give one concise best-effort answer; uncertainty is allowed.",
+    "Independently reconsider the question and state the most likely answer.",
+    "Make a final fresh attempt from memory only, without tools.",
+)
+
+
+def _pk_prompt(case: dict, target_as_of: str | None, variant_index: int = 0) -> str:
     target = target_as_of or "CURRENT"
     cutoff = case.get("knowledge_cutoff", {}).get("cutoff_date")
     cutoff_line = (
@@ -53,6 +63,7 @@ def _pk_prompt(case: dict, target_as_of: str | None) -> str:
         f"Question: {_question(case)}\n"
         f"Target date: {target}\n\n"
         f"{cutoff_line}"
+        f"Probe instruction: {PK_PROBE_VARIANTS[variant_index % len(PK_PROBE_VARIANTS)]}\n"
         "Answer directly using only your existing knowledge. Do not browse, use tools, or "
         "assume access to external sources. If you do not know, say so briefly."
     )
@@ -67,6 +78,7 @@ def run_pk_admission(
     store: JsonlResultStore,
     repeats: int,
     max_known_rate: float,
+    temperatures: list[float] | None = None,
     probe_call_model_fn=call_model,
 ) -> dict:
     """Admit a case-model pair only when the target answer is not already known.
@@ -74,11 +86,21 @@ def run_pk_admission(
     Every probe is a fresh one-turn conversation.  Probe responses are logged but
     never inserted into the later navigation conversation.
     """
-    prompt = _pk_prompt(case, target_as_of)
+    if temperatures is None:
+        base = [0.0, 0.2, 0.5, 0.7, 1.0]
+        temperatures = [base[index % len(base)] for index in range(repeats)]
+    if len(temperatures) != repeats:
+        raise ValueError("PK temperature schedule must have one value per repeat")
+    if any(not 0 <= value <= 2 for value in temperatures):
+        raise ValueError("PK temperatures must be between 0 and 2")
     labels: list[str] = []
+    deterministic_judgments = 0
     for probe_repeat in range(repeats):
+        prompt = _pk_prompt(case, target_as_of, probe_repeat)
+        probe_temperature = temperatures[probe_repeat]
         response = probe_call_model_fn(
-            model, [{"role": "user", "content": prompt}], temperature=0.0,
+            model, [{"role": "user", "content": prompt}],
+            temperature=probe_temperature,
         )
         judgment = judge.judge_answer(
             _question(case), response,
@@ -87,11 +109,16 @@ def run_pk_admission(
             [],
         )
         labels.append(judgment.decision)
+        deterministic = bool(judgment.raw.get("deterministic_gate"))
+        deterministic_judgments += int(deterministic)
         store.write(
             slot="pk_probe", case_id=case["id"], model=model, arm="admission",
             probe_repeat=probe_repeat, target_snapshot_as_of=target_as_of,
             prompt=prompt, response=response, judgment=judgment.to_dict(),
             label=judgment.decision, fresh_context=True, tools_available=False,
+            probe_variant=probe_repeat % len(PK_PROBE_VARIANTS),
+            probe_temperature=probe_temperature,
+            judge_mode="deterministic_alias" if deterministic else "llm_fallback",
         )
 
     label_counts = {label: labels.count(label) for label in sorted(set(labels))}
@@ -118,6 +145,10 @@ def run_pk_admission(
         "passed": passed,
         "reason": reason,
         "target_snapshot_as_of": target_as_of,
+        "temperature_schedule": temperatures,
+        "probe_method": "fresh_context_varied_prompt_temperature_ensemble",
+        "deterministic_judgments": deterministic_judgments,
+        "llm_fallback_judgments": repeats - deterministic_judgments,
     }
     store.write(
         slot="pk_gate", case_id=case["id"], model=model, arm="admission", **gate,
@@ -126,6 +157,7 @@ def run_pk_admission(
 
 
 def _snapshot_values(raw: str | None, case: dict) -> list[str | None]:
+    """Return the oracle dates, or an explicit legacy fixed-date allowlist."""
     tokens = [item.strip() for item in (raw or "").split(",") if item.strip()]
     if not tokens:
         before, after = _case_endpoints(case)
@@ -160,6 +192,32 @@ def _snapshot_values(raw: str | None, case: dict) -> list[str | None]:
     return values
 
 
+def _snapshot_range(case: dict) -> tuple[str, str]:
+    """Return the public cutoff-to-target range without intermediate oracle dates."""
+    before, after = _case_endpoints(case)
+    if before is None or after is None:
+        raise ValueError(
+            f"{case.get('id', '<missing-id>')}: agent-selected time requires dated "
+            "before and target snapshots"
+        )
+    try:
+        start = date.fromisoformat(before)
+        end = date.fromisoformat(after)
+    except ValueError as exc:
+        raise ValueError(
+            f"{case.get('id', '<missing-id>')}: before and target must use YYYY-MM-DD"
+        ) from exc
+    if start.isoformat() != before or end.isoformat() != after:
+        raise ValueError(
+            f"{case.get('id', '<missing-id>')}: before and target must use YYYY-MM-DD"
+        )
+    if start >= end:
+        raise ValueError(
+            f"{case.get('id', '<missing-id>')}: target must be after the cutoff snapshot"
+        )
+    return before, after
+
+
 def _contract_hash(cases: list[dict], args) -> str:
     payload = {
         "schema": CONTRACT_SCHEMA,
@@ -168,11 +226,17 @@ def _contract_hash(cases: list[dict], args) -> str:
         "judge_model": args.judge_model,
         "judge_min_confidence": args.judge_min_confidence,
         "snapshot_dates": args.snapshot_dates,
+        "snapshot_policy": (
+            "fixed_allowlist" if args.snapshot_dates else "agent_selected_range"
+        ),
         "repeats": args.repeats,
         "max_steps": args.max_steps,
         "start_distance": args.start_distance,
         "backlink_branch_cap": args.backlink_branch_cap,
+        "arena_node_cap": args.arena_node_cap,
+        "arena_discovery_mode": "offline_cache" if args.offline else "live_api",
         "pk_repeats": args.pk_repeats,
+        "pk_temperature_schedule": args.pk_temperature_schedule,
         "pk_max_known_rate": args.pk_max_known_rate,
         "temperature": args.temperature,
         "lang": args.lang,
@@ -215,36 +279,37 @@ def _navigation_id(navigation: dict) -> str:
 
 
 def _navigation_metrics(
-    result: dict, navigation: dict, start_title: str
+    result: dict, navigation: dict, start_title: str, *, strict_arena: bool = True
 ) -> dict:
     distances = navigation["distances"]
     target_key = navigation["target_key"]
-    first_state_key = next((
-        page_version_key(str(record.get("to_title", "")), record["revision_id"])
-        for record in result["trajectory"]
-        if record.get("action") == "switch_snapshot"
-        and not str(record.get("result", "")).startswith("Error:")
-        and record.get("revision_id") is not None
-    ), None)
-    if first_state_key is None:
+    initial_state = result.get("initial_state") or {}
+    initial_state_key = (
+        page_version_key(str(initial_state.get("title", "")), initial_state["revision_id"])
+        if initial_state.get("revision_id") is not None else None
+    )
+    initial_distance = distances.get(initial_state_key) if initial_state_key else None
+    if initial_distance is None:
         start_state_distances = [
             state["distance_to_pivot"] for state in navigation["states"].values()
             if state["title"].casefold() == start_title.casefold()
         ]
     else:
-        first_distance = navigation["distances"].get(first_state_key)
-        start_state_distances = [] if first_distance is None else [first_distance]
+        start_state_distances = [initial_distance]
     if not start_state_distances:
         raise ValueError(f"start title {start_title!r} is absent from navigation graph")
-    # The first successful switch_snapshot binds the initially timeless page
-    # title to a revision, so it is one navigation step in the measured state graph.
-    shortest_navigation_steps = 1 + min(start_state_distances)
+    # Initial state is now a real cutoff revision and costs no tool action.  If
+    # that exact revision is outside the bounded reference arena, one temporal
+    # move is needed to enter the nearest represented state for the same title.
+    shortest_navigation_steps = min(start_state_distances) + int(initial_distance is None)
     navigation_steps = 0
     seen_versions: set[str] = set()
     revisit_count = 0
-    first_target_navigation_steps: int | None = None
+    initial_is_target = initial_state_key == target_key
+    first_target_navigation_steps: int | None = 0 if initial_is_target else None
     first_target_tool_step: int | None = None
     distance_trace: list[dict] = []
+    unknown_distance_count = 0
     for record in result["trajectory"]:
         action = record.get("action")
         success = (
@@ -262,9 +327,11 @@ def _navigation_metrics(
         seen_versions.add(key)
         distance = distances.get(key)
         if distance is None:
-            raise ValueError(
-                f"trajectory entered page-version {key!r} outside navigation arena"
-            )
+            unknown_distance_count += 1
+            if strict_arena:
+                raise ValueError(
+                    f"trajectory entered page-version {key!r} outside navigation arena"
+                )
         record["navigation_step"] = navigation_steps
         record["distance_to_pivot"] = distance
         record["revisited"] = revisited
@@ -284,7 +351,7 @@ def _navigation_metrics(
         first_target_navigation_steps - shortest_navigation_steps
         if first_target_navigation_steps is not None else None
     )
-    if detour_steps is not None and detour_steps < 0:
+    if detour_steps is not None and detour_steps < 0 and strict_arena:
         raise ValueError(
             "trajectory beat the recorded minimum; navigation arena contract is inconsistent"
         )
@@ -299,7 +366,303 @@ def _navigation_metrics(
         "revisit_count": revisit_count,
         "cycle_detected": revisit_count > 0,
         "distance_trace": distance_trace,
+        "reference_distance_coverage_rate": (
+            (navigation_steps - unknown_distance_count) / navigation_steps
+            if navigation_steps else 1.0
+        ),
+        "outside_reference_arena_count": unknown_distance_count,
+        "reference_shortcut_detected": (
+            detour_steps is not None and detour_steps < 0
+        ),
+        "initial_state_in_reference_arena": initial_distance is not None,
     }
+
+
+def _semantic_waypoint_metrics(result: dict, case: dict) -> dict:
+    """Compare against one generated proof route without making it mandatory.
+
+    Hyperlink steps must match the declared entity relation and must really
+    have succeeded in the rendered revision.  Intermediate temporal steps may
+    use any strictly later model-selected date; only the first cutoff and final
+    target dates are fixed by the question contract.  Exact generated
+    revisions remain useful reference evidence, not a secret answer the model
+    has to guess.
+    """
+    waypoints = case.get("temporal_waypoints") or []
+    if not waypoints:
+        return {
+            "semantic_route_complete": None,
+            "semantic_waypoints_completed": None,
+            "semantic_waypoint_count": 0,
+            "semantic_completion_rate": None,
+            "semantic_shortest_navigation_steps": None,
+            "semantic_actual_steps_to_complete": None,
+            "semantic_detour_steps": None,
+            "semantic_shortest_arrival": None,
+            "required_temporal_switches": 0,
+            "actual_required_temporal_switches": 0,
+            "actual_required_snapshot_visits": 0,
+            "reference_route_match": None,
+            "reference_waypoints_completed": None,
+            "reference_waypoint_count": 0,
+            "reference_route_coverage": None,
+            "reference_route_steps": None,
+        }
+
+    required_temporal = sum(
+        item.get("incoming_edge") == "temporal" for item in waypoints[1:]
+    )
+    progress = 0
+    temporal_completed = 0
+    reference_revision_visits: set[int] = set()
+    completion_navigation_step: int | None = None
+    route_date: date | None = None
+    _, target_as_of = _case_endpoints(case)
+    target_date = date.fromisoformat(target_as_of) if target_as_of else None
+
+    initial = result.get("initial_state") or {}
+    if waypoints:
+        first = waypoints[0]
+        if (
+            str(initial.get("title", "")).casefold()
+            == str(first.get("title", "")).casefold()
+            and initial.get("snapshot_token") == first.get("as_of")
+        ):
+            progress = 1
+            route_date = date.fromisoformat(str(first["as_of"]))
+    initial_waypoint_loaded = progress == 1
+
+    def successful_navigation(record: dict) -> bool:
+        return (
+            record.get("action") in {"switch_snapshot", "follow_link"}
+            and not str(record.get("result", "")).startswith("Error:")
+            and record.get("revision_id") is not None
+        )
+
+    def record_date(record: dict, expected: dict) -> date | None:
+        token = record.get("snapshot_token")
+        if isinstance(token, str):
+            try:
+                parsed = date.fromisoformat(token)
+            except ValueError:
+                parsed = None
+            if parsed is not None and parsed.isoformat() == token:
+                return parsed
+        # Compatibility for old exact-waypoint artifacts that predate explicit
+        # snapshot tokens in test fixtures.
+        if record.get("revision_id") == expected.get("revision_id"):
+            as_of = expected.get("as_of")
+            if isinstance(as_of, str):
+                try:
+                    return date.fromisoformat(as_of)
+                except ValueError:
+                    return None
+        return None
+
+    for record in result.get("trajectory", []):
+        if not successful_navigation(record):
+            continue
+        action = record.get("action")
+        destination_title = str(record.get("to_title", ""))
+        destination_revision = int(record["revision_id"])
+        if any(
+            destination_title.casefold() == str(item.get("title", "")).casefold()
+            and destination_revision == item.get("revision_id")
+            for item in waypoints
+        ):
+            reference_revision_visits.add(destination_revision)
+        if progress == 0:
+            expected = waypoints[0]
+            selected_date = record_date(record, expected)
+            expected_cutoff = date.fromisoformat(str(expected["as_of"]))
+            if (
+                action == "switch_snapshot"
+                and destination_title.casefold()
+                == str(expected["title"]).casefold()
+                and selected_date == expected_cutoff
+            ):
+                progress = 1
+                route_date = selected_date
+                record["semantic_waypoint_index"] = 0
+                record["semantic_progress"] = progress
+            continue
+        if progress >= len(waypoints):
+            continue
+        expected = waypoints[progress]
+        expected_action = (
+            "switch_snapshot"
+            if expected.get("incoming_edge") == "temporal" else "follow_link"
+        )
+        previous = waypoints[progress - 1]
+        source_matches = (
+            str(record.get("from_title", "")).casefold()
+            == str(previous["title"]).casefold()
+        )
+        destination_matches = (
+            destination_title.casefold() == str(expected["title"]).casefold()
+        )
+        advances = False
+        if action == expected_action and source_matches and destination_matches:
+            if expected_action == "follow_link":
+                from_token = record.get("from_snapshot_token")
+                to_token = record.get("snapshot_token")
+                advances = (
+                    from_token is None or to_token is None or from_token == to_token
+                )
+            else:
+                selected_date = record_date(record, expected)
+                is_final_temporal_switch = not any(
+                    item.get("incoming_edge") == "temporal"
+                    for item in waypoints[progress + 1:]
+                )
+                advances = (
+                    selected_date is not None
+                    and route_date is not None
+                    and selected_date > route_date
+                    and (
+                        selected_date == target_date
+                        if is_final_temporal_switch else
+                        target_date is None or selected_date < target_date
+                    )
+                )
+                if advances:
+                    route_date = selected_date
+                    temporal_completed += 1
+        if advances:
+            record["semantic_waypoint_index"] = progress
+            progress += 1
+            record["semantic_progress"] = progress
+            if progress == len(waypoints):
+                completion_navigation_step = record.get("navigation_step")
+
+    count = len(waypoints)
+    complete = progress == count
+    semantic_shortest_steps = max(0, count - int(initial_waypoint_loaded))
+    semantic_detour = (
+        int(completion_navigation_step) - semantic_shortest_steps
+        if completion_navigation_step is not None else None
+    )
+    metrics = {
+        "semantic_route_complete": complete,
+        "semantic_waypoints_completed": progress,
+        "semantic_waypoint_count": count,
+        "semantic_completion_rate": progress / count,
+        "semantic_shortest_navigation_steps": semantic_shortest_steps,
+        "semantic_actual_steps_to_complete": completion_navigation_step,
+        "semantic_detour_steps": semantic_detour,
+        "semantic_shortest_arrival": semantic_detour == 0,
+        "required_temporal_switches": required_temporal,
+        "actual_required_temporal_switches": temporal_completed,
+        "actual_required_snapshot_visits": progress,
+        "reference_waypoint_revision_visits": len(reference_revision_visits),
+    }
+    metrics.update({
+        "reference_route_match": complete,
+        "reference_waypoints_completed": progress,
+        "reference_waypoint_count": count,
+        "reference_route_coverage": progress / count,
+        "reference_route_steps": completion_navigation_step,
+    })
+    return metrics
+
+
+def _capability_metrics(
+    result: dict, *, target_title: str, target_as_of: str | None,
+    cutoff_reference: str | None, accepted_answers: list[str],
+) -> dict:
+    """Decompose browsing into observable abilities without using an oracle path."""
+    trajectory = result.get("trajectory", [])
+
+    def rows(action: str) -> list[dict]:
+        return [row for row in trajectory if row.get("action") == action]
+
+    def successful(row: dict) -> bool:
+        return not str(row.get("result", "")).startswith("Error:")
+
+    revisions = rows("list_revisions")
+    switches = rows("switch_snapshot")
+    follows = rows("follow_link")
+    errors = [row for row in trajectory if not successful(row)]
+    error_counts: dict[str, int] = {}
+    for row in errors:
+        action = str(row.get("action") or "unknown")
+        error_counts[action] = error_counts.get(action, 0) + 1
+    visited = result.get("visited_versions", [])
+    evidence = result.get("evidence_pages", [])
+    initial = result.get("initial_state") or {}
+    target_page_seen = any(
+        str(page.get("title", "")).casefold() == target_title.casefold()
+        for page in evidence
+    )
+    target_snapshot_page_seen = any(
+        str(page.get("title", "")).casefold() == target_title.casefold()
+        and page.get("as_of") == target_as_of
+        for page in evidence
+    )
+    normalized_answers = [
+        " ".join(value.casefold().split()) for value in accepted_answers if value.strip()
+    ]
+    target_snapshot_evidence_seen = any(
+        page.get("as_of") == target_as_of
+        and any(
+            alias in " ".join(str(page.get("content", "")).casefold().split())
+            for alias in normalized_answers
+        )
+        for page in evidence
+    )
+    return {
+        "cutoff_state_loaded": (
+            cutoff_reference is None
+            or initial.get("snapshot_token") == cutoff_reference
+        ),
+        "revision_discovery_attempts": len(revisions),
+        "revision_discovery_successes": sum(successful(row) for row in revisions),
+        "temporal_switch_attempts": len(switches),
+        "temporal_switch_successes": sum(successful(row) for row in switches),
+        "hyperlink_follow_attempts": len(follows),
+        "hyperlink_follow_successes": sum(successful(row) for row in follows),
+        "unique_pages_visited": len({
+            str(page.get("title", "")).casefold() for page in visited
+        }),
+        "unique_revisions_visited": len({
+            (str(page.get("title", "")).casefold(), page.get("revision_id"))
+            for page in visited
+        }),
+        "target_page_seen": target_page_seen,
+        "target_snapshot_page_seen": target_snapshot_page_seen,
+        "target_snapshot_evidence_seen": target_snapshot_evidence_seen,
+        "answer_submitted": bool(str(result.get("final_answer") or "").strip()),
+        "tool_error_count": len(errors),
+        "tool_errors_by_action": error_counts,
+    }
+
+
+def _failure_mode(capabilities: dict, label: str, stop_reason: str) -> str:
+    if label == "correct_after":
+        return (
+            "success_with_target_evidence"
+            if capabilities["target_snapshot_evidence_seen"]
+            else "correct_without_visible_target_evidence"
+        )
+    if not capabilities["answer_submitted"]:
+        return "no_answer_before_step_budget" if stop_reason == "max_steps" else "no_answer"
+    if not capabilities["temporal_switch_successes"]:
+        return "temporal_exploration_failure"
+    if capabilities["revision_discovery_attempts"] and not capabilities[
+        "revision_discovery_successes"
+    ]:
+        return "revision_discovery_failure"
+    if capabilities["hyperlink_follow_attempts"] and not capabilities[
+        "hyperlink_follow_successes"
+    ]:
+        return "hyperlink_navigation_failure"
+    if not capabilities["target_page_seen"]:
+        return "target_page_not_found"
+    if not capabilities["target_snapshot_evidence_seen"]:
+        return "target_time_not_grounded"
+    if label == "old_snapshot_answer":
+        return "stale_answer_after_target_evidence"
+    return "wrong_answer_after_target_evidence"
 
 
 def _completed(
@@ -355,6 +718,7 @@ def run_case(
     start_distance: int,
     max_steps: int,
     temperature: float,
+    snapshot_date_range: tuple[str, str] | None = None,
     browse_call_model_fn=None,
 ) -> str | None:
     target = configured_pivot(case, backend)
@@ -388,14 +752,37 @@ def run_case(
         max_steps=max_steps,
         target_title=target_page.title,
         target_as_of=target_as_of,
-        allowed_version_keys=set(navigation["allowed_version_keys"]),
-        allowed_titles_by_snapshot=navigation["allowed_titles_by_snapshot"],
+        snapshot_date_range=snapshot_date_range,
+        allowed_version_keys=(
+            set(navigation["allowed_version_keys"])
+            if snapshot_date_range is None else None
+        ),
+        allowed_titles_by_snapshot=(
+            navigation["allowed_titles_by_snapshot"]
+            if snapshot_date_range is None else None
+        ),
         reveal_target_title=not bool(case.get("hide_pivot_title")),
         cutoff_reference=case.get("knowledge_cutoff", {}).get("cutoff_date"),
+        semantic_route_contract=(
+            {
+                "relation_hops": case.get("reasoning_hop_count", 0),
+                "temporal_switches": case.get("required_temporal_switches", 0),
+            }
+            if case.get("temporal_waypoints") else None
+        ),
         temperature=temperature,
         **kwargs,
     )
-    metrics = _navigation_metrics(result, navigation, start_title)
+    metrics = _navigation_metrics(
+        result, navigation, start_title,
+        strict_arena=snapshot_date_range is None,
+    )
+    semantic_metrics = _semantic_waypoint_metrics(result, case)
+    capabilities = _capability_metrics(
+        result, target_title=target_page.title, target_as_of=target_as_of,
+        cutoff_reference=case.get("knowledge_cutoff", {}).get("cutoff_date"),
+        accepted_answers=case.get("new_answer_keywords", []),
+    )
     for record in result["trajectory"]:
         store.write(
             slot="temporal_step", case_id=case["id"], model=model, arm="temporal",
@@ -408,13 +795,29 @@ def run_case(
         target_revision_id=target_page.revision_id, question=_question(case),
         reasoning_hop_count=case.get("reasoning_hop_count"),
         reasoning_chain=case.get("reasoning_chain", []),
+        relation_families=case.get("relation_families", []),
+        selection_metadata=case.get("selection_metadata"),
+        temporal_waypoints=case.get("temporal_waypoints", []),
         knowledge_cutoff=case.get("knowledge_cutoff"),
         navigation_id=_navigation_id(navigation),
-        allowed_as_of=snapshot_dates, target_snapshot_as_of=target_as_of,
+        snapshot_mode=(
+            "agent_selected_range" if snapshot_date_range is not None
+            else "fixed_allowlist"
+        ),
+        snapshot_range=(
+            {"start": snapshot_date_range[0], "end": snapshot_date_range[1]}
+            if snapshot_date_range is not None else None
+        ),
+        reference_snapshot_dates=snapshot_dates,
+        allowed_as_of=(snapshot_dates if snapshot_date_range is None else []),
+        target_snapshot_as_of=target_as_of,
         final_title=result["final_title"],
         final_snapshot_token=result["final_snapshot_token"],
         final_answer=result["final_answer"], stop_reason=result["stop_reason"],
+        agent_initial_messages=result["initial_messages"],
+        agent_tool_contract=result["tool_contract"],
         target_title_revealed=result["target_title_revealed"],
+        initial_state=result["initial_state"],
         visited_versions=result["visited_versions"],
         **metrics,
         evidence_revisions=[
@@ -424,6 +827,9 @@ def run_case(
             }
             for page in result["evidence_pages"]
         ],
+        raw_shortest_navigation_steps=metrics["shortest_navigation_steps"],
+        **capabilities,
+        **semantic_metrics,
     )
     if result["stop_reason"] == "error":
         return None
@@ -437,6 +843,14 @@ def run_case(
         attempt_id=attempt_id, repeat=repeat, question=_question(case),
         response=result["final_answer"], judgment=judgment.to_dict(),
         label=judgment.decision, target_snapshot_as_of=target_as_of,
+        judge_mode=(
+            "deterministic_alias" if judgment.raw.get("deterministic_gate")
+            else "llm_fallback"
+        ),
+        failure_mode=_failure_mode(
+            capabilities, judgment.decision, result["stop_reason"]
+        ),
+        capabilities=capabilities,
     )
     return attempt_id
 
@@ -474,11 +888,18 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
     for row in rows:
         if row.get("slot") == "pk_gate":
             pk_gates[(str(row.get("model")), str(row.get("case_id")))] = row
-    counts: dict[tuple[str, str], dict[str, int]] = {
+    counts: dict[tuple[str, str], dict[str, Any]] = {
         key: {
             "n": 0, "correct_after": 0, "old_snapshot_answer": 0,
+            "correct_without_visible_support": 0,
+            "no_answer": 0, "blank_answer_judge_overrides": 0,
             "pivot_hit": 0, "shortest_arrival": 0, "cycle_detected": 0,
             "found_but_wrong": 0, "detour_sum": 0, "detour_n": 0,
+            "semantic_route_complete": 0, "semantic_progress_sum": 0,
+            "revision_discovery_used": 0, "temporal_explored": 0,
+            "hyperlink_navigation_succeeded": 0,
+            "target_snapshot_evidence_seen": 0, "answer_submitted": 0,
+            "failure_modes": {},
         }
         for key in pk_gates
     }
@@ -486,19 +907,59 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
         key = (str(row.get("model")), str(row.get("case_id")))
         bucket = counts.setdefault(key, {
             "n": 0, "correct_after": 0, "old_snapshot_answer": 0,
+            "correct_without_visible_support": 0,
+            "no_answer": 0, "blank_answer_judge_overrides": 0,
             "pivot_hit": 0, "shortest_arrival": 0, "cycle_detected": 0,
             "found_but_wrong": 0, "detour_sum": 0, "detour_n": 0,
+            "semantic_route_complete": 0, "semantic_progress_sum": 0,
+            "revision_discovery_used": 0, "temporal_explored": 0,
+            "hyperlink_navigation_succeeded": 0,
+            "target_snapshot_evidence_seen": 0, "answer_submitted": 0,
+            "failure_modes": {},
         })
         bucket["n"] += 1
-        label = str(row.get("label"))
+        summary = summaries.get(str(row.get("attempt_id")), {})
+        blank_answer = (
+            "final_answer" in summary
+            and not str(summary.get("final_answer") or "").strip()
+        )
+        label = "no_answer" if blank_answer else str(row.get("label"))
+        if blank_answer and row.get("label") != "no_answer":
+            bucket["blank_answer_judge_overrides"] += 1
         if label in bucket:
             bucket[label] += 1
-        summary = summaries.get(str(row.get("attempt_id")), {})
         pivot_hit = bool(summary.get("pivot_hit"))
         bucket["pivot_hit"] += int(pivot_hit)
         bucket["shortest_arrival"] += int(bool(summary.get("shortest_arrival")))
         bucket["cycle_detected"] += int(bool(summary.get("cycle_detected")))
-        bucket["found_but_wrong"] += int(pivot_hit and label != "correct_after")
+        bucket["found_but_wrong"] += int(
+            pivot_hit and label not in {
+                "correct_after", "correct_without_visible_support",
+            }
+        )
+        bucket["revision_discovery_used"] += int(
+            int(summary.get("revision_discovery_attempts", 0) or 0) > 0
+        )
+        bucket["temporal_explored"] += int(
+            int(summary.get("temporal_switch_successes", 0) or 0) > 0
+        )
+        bucket["hyperlink_navigation_succeeded"] += int(
+            int(summary.get("hyperlink_follow_successes", 0) or 0) > 0
+        )
+        bucket["target_snapshot_evidence_seen"] += int(
+            bool(summary.get("target_snapshot_evidence_seen"))
+        )
+        bucket["answer_submitted"] += int(bool(summary.get("answer_submitted")))
+        failure_mode = str(row.get("failure_mode") or "unclassified")
+        failure_modes = bucket["failure_modes"]
+        failure_modes[failure_mode] = failure_modes.get(failure_mode, 0) + 1
+        bucket["semantic_route_complete"] += int(
+            bool(summary.get("semantic_route_complete"))
+        )
+        if summary.get("semantic_completion_rate") is not None:
+            bucket["semantic_progress_sum"] += float(
+                summary["semantic_completion_rate"]
+            )
         if summary.get("detour_steps") is not None:
             bucket["detour_sum"] += int(summary["detour_steps"])
             bucket["detour_n"] += 1
@@ -507,10 +968,18 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
             "model", "case_id", "pk_admitted", "pk_gate_reason", "pk_probe_n",
             "pk_stick_new", "pk_stick_new_rate_pct", "pk_stick_old",
             "pk_stick_old_rate_pct", "pk_other", "n", "correct_after",
+            "pk_deterministic_judgments", "pk_llm_fallback_judgments",
             "correct_after_rate_pct",
+            "correct_without_visible_support",
             "old_snapshot_answer", "old_snapshot_rate_pct",
+            "no_answer", "no_answer_rate_pct", "blank_answer_judge_overrides",
             "pivot_hit", "pivot_hit_rate_pct", "shortest_arrival",
             "shortest_arrival_rate_pct", "mean_detour_steps_on_hit",
+            "semantic_route_complete", "semantic_route_complete_rate_pct",
+            "mean_semantic_completion_pct",
+            "revision_discovery_used", "temporal_explored",
+            "hyperlink_navigation_succeeded", "target_snapshot_evidence_seen",
+            "answer_submitted", "failure_modes_json",
             "cycle_detected", "cycle_rate_pct", "found_but_wrong",
         ]
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -535,14 +1004,30 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
                     if pk_n else ""
                 ),
                 "pk_other": pk_gate.get("other_count", ""),
+                "pk_deterministic_judgments": pk_gate.get(
+                    "deterministic_judgments", ""
+                ),
+                "pk_llm_fallback_judgments": pk_gate.get(
+                    "llm_fallback_judgments", ""
+                ),
                 "correct_after": bucket["correct_after"],
                 "correct_after_rate_pct": (
                     round(100 * bucket["correct_after"] / n, 1) if n else ""
                 ),
+                "correct_without_visible_support": bucket[
+                    "correct_without_visible_support"
+                ],
                 "old_snapshot_answer": bucket["old_snapshot_answer"],
                 "old_snapshot_rate_pct": (
                     round(100 * bucket["old_snapshot_answer"] / n, 1) if n else ""
                 ),
+                "no_answer": bucket["no_answer"],
+                "no_answer_rate_pct": (
+                    round(100 * bucket["no_answer"] / n, 1) if n else ""
+                ),
+                "blank_answer_judge_overrides": bucket[
+                    "blank_answer_judge_overrides"
+                ],
                 "pivot_hit": bucket["pivot_hit"],
                 "pivot_hit_rate_pct": (
                     round(100 * bucket["pivot_hit"] / n, 1) if n else ""
@@ -554,6 +1039,27 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
                 "mean_detour_steps_on_hit": (
                     round(bucket["detour_sum"] / bucket["detour_n"], 2)
                     if bucket["detour_n"] else ""
+                ),
+                "semantic_route_complete": bucket["semantic_route_complete"],
+                "semantic_route_complete_rate_pct": (
+                    round(100 * bucket["semantic_route_complete"] / n, 1)
+                    if n else ""
+                ),
+                "mean_semantic_completion_pct": (
+                    round(100 * bucket["semantic_progress_sum"] / n, 1)
+                    if n else ""
+                ),
+                "revision_discovery_used": bucket["revision_discovery_used"],
+                "temporal_explored": bucket["temporal_explored"],
+                "hyperlink_navigation_succeeded": bucket[
+                    "hyperlink_navigation_succeeded"
+                ],
+                "target_snapshot_evidence_seen": bucket[
+                    "target_snapshot_evidence_seen"
+                ],
+                "answer_submitted": bucket["answer_submitted"],
+                "failure_modes_json": json.dumps(
+                    bucket["failure_modes"], sort_keys=True
                 ),
                 "cycle_detected": bucket["cycle_detected"],
                 "cycle_rate_pct": (
@@ -574,7 +1080,10 @@ def main() -> int:
     parser.add_argument("--case-ids")
     parser.add_argument(
         "--snapshot-dates",
-        help="comma-separated dates available to switch_snapshot; CURRENT is allowed",
+        help=(
+            "legacy fixed allowlist for switch_snapshot; omit it to let the model choose "
+            "any date from the case cutoff through its target"
+        ),
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--max-steps", type=int, default=16)
@@ -587,8 +1096,16 @@ def main() -> int:
         help="maximum verified backlink predecessors expanded per page-version state",
     )
     parser.add_argument(
-        "--pk-repeats", type=int, default=3,
-        help="fresh-context prior-knowledge probes per case-model pair",
+        "--arena-node-cap", type=int, default=500,
+        help="maximum page-version nodes in the bounded reference arena",
+    )
+    parser.add_argument(
+        "--pk-repeats", type=int, default=5,
+        help="fresh-context varied-prompt prior-answer probes per case-model pair",
+    )
+    parser.add_argument(
+        "--pk-temperatures",
+        help="comma-separated PK sampling temperatures; count must equal --pk-repeats",
     )
     parser.add_argument(
         "--pk-max-known-rate", type=float, default=0.0,
@@ -606,16 +1123,36 @@ def main() -> int:
     assert_new_output_path(args.score_output)
     if args.repeats <= 0 or args.max_steps <= 0 or args.pk_repeats <= 0:
         parser.error("--repeats, --max-steps, and --pk-repeats must be > 0")
-    if args.start_distance <= 0 or args.backlink_branch_cap <= 0:
-        parser.error("--start-distance and --backlink-branch-cap must be > 0")
-    if args.max_steps < args.start_distance + 2:
+    if min(args.start_distance, args.backlink_branch_cap, args.arena_node_cap) <= 0:
         parser.error(
-            "--max-steps must allow the initial time selection, shortest path, and answer"
+            "--start-distance, --backlink-branch-cap, and --arena-node-cap must be > 0"
+        )
+    if args.max_steps < args.start_distance + 1:
+        parser.error(
+            "--max-steps must allow the shortest navigation path and answer submission"
         )
     if not 0 <= args.judge_min_confidence <= 1:
         parser.error("--judge-min-confidence must be between 0 and 1")
     if not 0 <= args.pk_max_known_rate <= 1:
         parser.error("--pk-max-known-rate must be between 0 and 1")
+    if args.pk_temperatures:
+        try:
+            args.pk_temperature_schedule = [
+                float(value.strip()) for value in args.pk_temperatures.split(",")
+                if value.strip()
+            ]
+        except ValueError:
+            parser.error("--pk-temperatures must be comma-separated numbers")
+        if len(args.pk_temperature_schedule) != args.pk_repeats:
+            parser.error("--pk-temperatures count must equal --pk-repeats")
+    else:
+        base_temperatures = [0.0, 0.2, 0.5, 0.7, 1.0]
+        args.pk_temperature_schedule = [
+            base_temperatures[index % len(base_temperatures)]
+            for index in range(args.pk_repeats)
+        ]
+    if any(not 0 <= value <= 2 for value in args.pk_temperature_schedule):
+        parser.error("--pk-temperatures values must be between 0 and 2")
     models = [item.strip() for item in args.models.split(",") if item.strip()]
     if not models:
         parser.error("--models must not be empty")
@@ -634,17 +1171,23 @@ def main() -> int:
         print("\n".join(f"[config error] {error}" for error in errors), file=sys.stderr)
         return 2
     required_max_steps = max(
-        (int(case.get("expected_navigation_distance", args.start_distance)) + 2
+        (int(case.get("expected_navigation_distance", args.start_distance)) + 1
          for case in cases),
-        default=args.start_distance + 2,
+        default=args.start_distance + 1,
     )
     if args.max_steps < required_max_steps:
         parser.error(
             f"--max-steps must be >= {required_max_steps} for the deepest declared "
-            "reasoning chain, initial time selection, and answer"
+            "reasoning chain and answer submission"
         )
     # Validate all per-case date sets before opening the append-only result file.
-    dates_by_case = {case["id"]: _snapshot_values(args.snapshot_dates, case) for case in cases}
+    dates_by_case = {
+        case["id"]: _snapshot_values(args.snapshot_dates, case) for case in cases
+    }
+    ranges_by_case = {
+        case["id"]: (None if args.snapshot_dates else _snapshot_range(case))
+        for case in cases
+    }
     contract_hash = _contract_hash(cases, args)
     completed = _completed(args.output, contract_hash)
     recorded_navigation_ids = _recorded_navigation_ids(args.output, contract_hash)
@@ -691,6 +1234,8 @@ def main() -> int:
                 navigation = temporal_reverse_bfs(
                     backend, target, target_as_of, dates_by_case[case["id"]],
                     graph_depth, branch_cap=args.backlink_branch_cap,
+                    max_nodes=args.arena_node_cap,
+                    required_waypoints=case.get("temporal_waypoints") or None,
                 )
                 if case.get("reasoning_chain"):
                     validate_chain_route(case, navigation)
@@ -712,6 +1257,7 @@ def main() -> int:
                             case=case, model=model, target_as_of=target_as_of,
                             judge=judge, store=store, repeats=args.pk_repeats,
                             max_known_rate=args.pk_max_known_rate,
+                            temperatures=args.pk_temperature_schedule,
                         )
                         admitted = bool(gate["passed"])
                         print(
@@ -736,6 +1282,7 @@ def main() -> int:
             if not admitted_models:
                 print(f"[skip] {case['id']}: no model passed PK admission")
                 continue
+            snapshot_range = ranges_by_case[case["id"]]
             navigation_id = _navigation_id(navigation)
             if navigation_id not in recorded_navigation_ids:
                 store.write(
@@ -747,6 +1294,23 @@ def main() -> int:
                     arena_edges=navigation["arena_edges"],
                     admitted_models=admitted_models,
                     coverage_note=navigation["coverage_note"],
+                    discovery_mode=navigation["discovery_mode"],
+                    branch_cap=navigation["branch_cap"],
+                    max_nodes=navigation["max_nodes"],
+                    arena_truncated=navigation["arena_truncated"],
+                    snapshot_mode=(
+                        "agent_selected_range"
+                        if snapshot_range is not None
+                        else "fixed_allowlist"
+                    ),
+                    snapshot_range=(
+                        {
+                            "start": snapshot_range[0],
+                            "end": snapshot_range[1],
+                        }
+                        if snapshot_range is not None else None
+                    ),
+                    reference_only=snapshot_range is not None,
                 )
                 recorded_navigation_ids.add(navigation_id)
             for model in admitted_models:
@@ -763,6 +1327,7 @@ def main() -> int:
                             navigation=navigation,
                             start_distance=args.start_distance,
                             max_steps=args.max_steps, temperature=args.temperature,
+                            snapshot_date_range=snapshot_range,
                         )
                     except (WikipediaError, ValueError) as exc:
                         print(f"[error] {checkpoint}: {exc}")

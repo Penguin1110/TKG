@@ -1,40 +1,40 @@
 {
   "seeds": [
     {
-      "id": "intel_cutoff_ceo_successor_founded_firm",
+      "id": "manutd_tenhag_leverkusen_hjulmand",
       "model_id": "openai/gpt-4.1-mini",
-      "target_as_of": "2026-01-01",
-      "anchor_label": "Intel",
-      "answer_kind": "What",
-      "category": "corporate",
-      "old_answer_keywords": [],
+      "target_as_of": "2025-09-10",
+      "anchor_label": "Manchester United",
+      "answer_kind": "Who",
+      "category": "sports",
+      "old_answer_keywords": ["Erik ten Hag"],
       "hops": [
         {
-          "source_title": "Intel",
-          "target_title": "Pat Gelsinger",
-          "relation": "chief executive officer at cutoff",
-          "relative_clause": "the person who was chief executive officer of {source} at the tested model's registered knowledge cutoff",
+          "source_title": "Manchester United F.C.",
+          "target_title": "Erik ten Hag",
+          "relation": "manager at registered knowledge cutoff",
+          "relative_clause": "the person who managed {source} at the tested model's registered knowledge cutoff",
           "as_of": "2024-06-01",
-          "evidence": "Frank D. Yeary (chairman)Pat Gelsinger (CEO)",
-          "target_aliases": ["Pat Gelsinger"]
+          "evidence": "Manager Erik ten Hag",
+          "target_aliases": ["Erik ten Hag"]
         },
         {
-          "source_title": "Pat Gelsinger",
-          "target_title": "Lip-Bu Tan",
-          "relation": "successor as Intel chief executive officer",
-          "relative_clause": "the person who succeeded {source} as chief executive officer of Intel",
-          "as_of": "2026-01-01",
-          "evidence": "Succeeded byLip-Bu Tan",
-          "target_aliases": ["Lip-Bu Tan"]
+          "source_title": "Erik ten Hag",
+          "target_title": "Bayer 04 Leverkusen",
+          "relation": "later appointed head coach of club",
+          "relative_clause": "the Bundesliga club that later appointed {source} as head coach",
+          "as_of": "2025-06-01",
+          "evidence": "Current team Bayer Leverkusen (head coach)",
+          "target_aliases": ["Bayer Leverkusen"]
         },
         {
-          "source_title": "Lip-Bu Tan",
-          "target_title": "Walden International",
-          "relation": "venture-capital firm founded by subject",
-          "relative_clause": "the venture-capital firm founded by {source}",
-          "as_of": "2026-01-01",
-          "evidence": "Tan was a manager at EDS Nuclear and ECHO Energy and partner at the Walden USA investment fund before founding venture capital (VC) firm Walden International in 1987.",
-          "target_aliases": ["Walden International"]
+          "source_title": "Bayer 04 Leverkusen",
+          "target_title": "Kasper Hjulmand",
+          "relation": "head coach at target snapshot",
+          "relative_clause": "the head coach of {source}",
+          "as_of": "2025-09-10",
+          "evidence": "Coach Kasper Hjulmand",
+          "target_aliases": ["Kasper Hjulmand"]
         }
       ]
     }

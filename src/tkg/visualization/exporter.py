@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "tkg-visualization-v3"
+SCHEMA_VERSION = "tkg-visualization-v4"
 CURRENT_GROUP = "__CURRENT_SNAPSHOT__"
 
 
@@ -378,6 +378,18 @@ def _temporal_trajectory(
         allowed[-1] if allowed else None
     ))
     target_revision_id = summary.get("target_revision_id")
+    initial_state: dict[str, Any] = summary.get("initial_state") or next((
+        item for item in versions
+        if str(item.get("title", "")).casefold()
+        == str(summary.get("start_title", "")).casefold()
+    ), {})
+    initial_node_id = resolver.node_id(
+        str(initial_state.get("title") or summary.get("start_title") or pivot_title),
+        revision_id=initial_state.get("revision_id"),
+        snapshot_group=_group(
+            initial_state.get("snapshot_token", initial_state.get("as_of"))
+        ),
+    )
     pivot_version = next((
         item for item in reversed(versions)
         if str(item.get("title", "")).casefold() == pivot_title.casefold()
@@ -412,6 +424,19 @@ def _temporal_trajectory(
             distance = state.get("distance_to_pivot")
             if distance is not None:
                 distance_by_node_id[node_id] = int(distance)
+
+    semantic_waypoint_node_ids: list[str] = []
+    for waypoint in summary.get("temporal_waypoints", []):
+        node_id = resolver.node_id(
+            str(waypoint.get("title", "")),
+            revision_id=waypoint.get("revision_id"),
+            snapshot_group=_group(waypoint.get("as_of")),
+        )
+        semantic_waypoint_node_ids.append(node_id)
+        node = resolver.node_by_id[node_id]
+        indices = node.setdefault("semantic_waypoint_indices", [])
+        if waypoint.get("index") not in indices:
+            indices.append(waypoint.get("index"))
 
     events: list[dict[str, Any]] = []
     path_node_ids: list[str] = []
@@ -470,10 +495,21 @@ def _temporal_trajectory(
             "result": _excerpt(str(row.get("result", "")), 900),
             "free_text": _excerpt(str(row.get("free_text") or ""), 400),
             "snapshot_token": row.get("snapshot_token"),
+            "requested_snapshot_as_of": row.get(
+                "requested_snapshot_as_of",
+                row.get("args", {}).get("as_of") if action == "switch_snapshot" else None,
+            ),
+            "brief_reason": (
+                row.get("args", {}).get("brief_reason")
+                if action == "switch_snapshot" else None
+            ),
+            "resolved_revision_timestamp": row.get("resolved_revision_timestamp"),
             "revision_id": to_revision,
             "navigation_step": row.get("navigation_step"),
             "distance_to_pivot": distance_to_pivot,
             "revisited": bool(row.get("revisited")),
+            "semantic_waypoint_index": row.get("semantic_waypoint_index"),
+            "semantic_progress": row.get("semantic_progress"),
         })
         if (action in {"switch_snapshot", "follow_link"}
                 and not str(row.get("result", "")).startswith("Error:")
@@ -501,12 +537,20 @@ def _temporal_trajectory(
         "start_title": summary.get("start_title"),
         "reasoning_hop_count": summary.get("reasoning_hop_count"),
         "reasoning_chain": summary.get("reasoning_chain", []),
+        "relation_families": summary.get("relation_families", []),
+        "selection_metadata": summary.get("selection_metadata"),
+        "temporal_waypoints": summary.get("temporal_waypoints", []),
+        "semantic_waypoint_node_ids": semantic_waypoint_node_ids,
         "knowledge_cutoff": summary.get("knowledge_cutoff"),
+        "snapshot_mode": summary.get("snapshot_mode", "fixed_allowlist"),
+        "snapshot_range": summary.get("snapshot_range"),
+        "reference_snapshot_dates": summary.get("reference_snapshot_dates", []),
         "target_title_revealed": summary.get("target_title_revealed", True),
         "repeat": summary.get("repeat"),
         "final_title": summary.get("final_title"),
         "pivot_title": pivot_title,
         "pivot_node_id": pivot_node_id,
+        "initial_node_id": initial_node_id,
         "pivot_source": "temporal_summary.target_title",
         "snapshot_as_of": None,
         "page_hit": bool(summary.get("pivot_hit")),
@@ -526,14 +570,56 @@ def _temporal_trajectory(
         "snapshot_selection": None,
         "outcome_stage": "temporal_answer",
         "outcome_reason": label,
+        "failure_mode": judgment.get("failure_mode") if judgment else None,
         "outcome_evidence": ["final_judgment.label"],
         "path_node_ids": list(dict.fromkeys(path_node_ids)),
         "shortest_navigation_steps": summary.get("shortest_navigation_steps"),
+        "raw_shortest_navigation_steps": summary.get(
+            "raw_shortest_navigation_steps", summary.get("shortest_navigation_steps")
+        ),
+        "semantic_shortest_navigation_steps": summary.get(
+            "semantic_shortest_navigation_steps"
+        ),
+        "semantic_actual_steps_to_complete": summary.get(
+            "semantic_actual_steps_to_complete"
+        ),
+        "semantic_route_complete": summary.get("semantic_route_complete"),
+        "semantic_waypoints_completed": summary.get("semantic_waypoints_completed"),
+        "semantic_waypoint_count": summary.get("semantic_waypoint_count", 0),
+        "semantic_completion_rate": summary.get("semantic_completion_rate"),
+        "reference_route_match": summary.get(
+            "reference_route_match", summary.get("semantic_route_complete")
+        ),
+        "reference_route_coverage": summary.get(
+            "reference_route_coverage", summary.get("semantic_completion_rate")
+        ),
+        "revision_discovery_attempts": summary.get("revision_discovery_attempts", 0),
+        "revision_discovery_successes": summary.get("revision_discovery_successes", 0),
+        "temporal_switch_successes": summary.get("temporal_switch_successes", 0),
+        "hyperlink_follow_successes": summary.get("hyperlink_follow_successes", 0),
+        "target_snapshot_evidence_seen": bool(
+            summary.get("target_snapshot_evidence_seen")
+        ),
+        "answer_submitted": bool(summary.get("answer_submitted")),
+        "tool_error_count": summary.get("tool_error_count", 0),
+        "required_temporal_switches": summary.get("required_temporal_switches", 0),
+        "actual_required_temporal_switches": summary.get(
+            "actual_required_temporal_switches", 0
+        ),
         "actual_steps_to_first_pivot": summary.get("actual_steps_to_first_pivot"),
         "detour_steps": summary.get("detour_steps"),
         "shortest_arrival": bool(summary.get("shortest_arrival")),
         "revisit_count": summary.get("revisit_count", 0),
         "cycle_detected": bool(summary.get("cycle_detected")),
+        "reference_distance_coverage_rate": summary.get(
+            "reference_distance_coverage_rate"
+        ),
+        "outside_reference_arena_count": summary.get(
+            "outside_reference_arena_count", 0
+        ),
+        "reference_shortcut_detected": bool(
+            summary.get("reference_shortcut_detected")
+        ),
         "distance_by_node_id": distance_by_node_id,
         "events": events,
     }
@@ -807,8 +893,9 @@ def _load_trajectories(results_path: str | None, graph: dict[str, Any]) -> tuple
             outgoing[str(edge["source"])].append(edge)
     for trajectory in trajectories:
         pivot_node_id = trajectory.get("pivot_node_id")
+        initial_node_id = trajectory.get("initial_node_id")
         trajectory["initial_reveal_node_ids"] = (
-            [pivot_node_id] if pivot_node_id else []
+            [initial_node_id] if initial_node_id else ([pivot_node_id] if pivot_node_id else [])
         )
         for event in trajectory["events"]:
             expansion = event.get("expansion_node_id")

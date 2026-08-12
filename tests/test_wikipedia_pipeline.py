@@ -15,7 +15,9 @@ from tkg.experiment.contracts import JudgeResult, PageLink, PageSnapshot
 from tkg.experiment.results import JsonlResultStore, assert_new_output_path
 from legacy.wikipedia_prior_reversion_runner import run_trajectory
 from tkg.experiment.temporal_runner import (
-    _navigation_metrics, _snapshot_values, run_case as run_temporal_case,
+    _capability_metrics, _failure_mode, _navigation_metrics,
+    _snapshot_range, _snapshot_values,
+    run_case as run_temporal_case,
     run_pk_admission, write_scores as write_temporal_scores,
 )
 from legacy.wikipedia_prior_reversion_gates import answerability_for_item, evaluate_exposure
@@ -77,12 +79,47 @@ class _FakeWikiAPI:
         raise AssertionError(f"unexpected API request: {url} {params}")
 
 
+class _RevisionDateAPI:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, url, params, headers, timeout):
+        self.calls.append(dict(params))
+        return _Response({"query": {"pages": [{
+            "pageid": 1, "title": "Busy Page", "revisions": [
+                {"timestamp": f"2024-0{month}-01T12:00:00Z"}
+                for month in range(1, 6)
+            ],
+        }]}})
+
+
 def _page(title, revision, content, links=()):
     return PageSnapshot(
         title=title, page_id=revision, revision_id=revision,
         timestamp="2025-01-01T00:00:00Z", as_of="2025-01-01",
         content=content, links=[PageLink(target=t, anchor=a) for t, a in links],
     )
+
+
+def test_backend_revision_dates_are_sampled_cached_and_content_free():
+    api = _RevisionDateAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = WikipediaPageBackend(
+            cache_path=os.path.join(tmp, "wiki.db"), request_get=api,
+            min_request_interval=0,
+        )
+        first = backend.list_revision_dates(
+            "Busy Page", "2024-01-01", "2024-05-31", limit=3
+        )
+        second = backend.list_revision_dates(
+            "Busy Page", "2024-01-01", "2024-05-31", limit=2
+        )
+        backend.close()
+    assert first == ["2024-01-01", "2024-03-01", "2024-05-01"]
+    assert second == ["2024-01-01", "2024-05-01"]
+    assert len(api.calls) == 1
+    assert api.calls[0]["rvprop"] == "timestamp"
+    assert "content" not in json.dumps(first)
 
 
 class _MockBackend:
@@ -166,6 +203,36 @@ class _ScriptedTemporalModel:
             "id": f"temporal-{self.calls}", "type": "function",
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}
+
+
+class _ScriptedDateRangeModel:
+    def __init__(self, actions):
+        self.actions = actions
+        self.calls = []
+
+    def __call__(self, model, messages, tools, temperature=0.7):
+        self.calls.append({"messages": list(messages), "tools": tools})
+        name, args = self.actions[len(self.calls) - 1]
+        return {"role": "assistant", "content": None, "tool_calls": [{
+            "id": f"range-{len(self.calls)}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}
+
+
+class _DateRangeBackend:
+    def __init__(self):
+        self.requests = []
+
+    def fetch_page(self, title, as_of=None):
+        self.requests.append((title, as_of))
+        revision = 20 if as_of == "2025-01-01" else 15
+        page = _page(title, revision, f"Visible at {as_of}.")
+        page.as_of = as_of
+        page.timestamp = (
+            "2025-01-01T00:00:00Z" if revision == 20
+            else "2024-05-01T00:00:00Z"
+        )
+        return page
 
 
 class _ScriptedShortestModel:
@@ -260,6 +327,26 @@ def test_backend_revision_content_links_and_offline_cache():
                                   for call in revision_calls)
 
 
+def test_backend_reuses_parsed_revision_across_requested_dates():
+    fake = _FakeWikiAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = WikipediaPageBackend(
+            cache_path=os.path.join(tmp, "wiki.db"),
+            request_get=fake,
+            min_request_interval=0,
+        )
+        first = backend.fetch_page("Source Page", as_of="2025-01-01")
+        second = backend.fetch_page("Source Page", as_of="2025-01-02")
+        backend.close()
+    assert first.revision_id == second.revision_id == 20
+    revision_calls = [
+        params for _, params in fake.calls if params.get("prop") == "revisions"
+    ]
+    parse_calls = [params for _, params in fake.calls if params.get("action") == "parse"]
+    assert len(revision_calls) == 2
+    assert len(parse_calls) == 1
+
+
 def test_reverse_bfs_uses_backlinks():
     frontier = reverse_bfs_frontier(_MockBackend(), "Pivot Page", 2, as_of="2025-01-01")
     assert frontier == {0: ["Pivot Page"], 1: ["Source Page"]}
@@ -324,6 +411,30 @@ def test_snapshot_selection_is_a_required_auditable_first_tool():
     assert result["messages"][-1]["role"] == "tool"
 
 
+def test_dynamic_navigation_marks_revisions_outside_reference_without_crashing():
+    backend = _TemporalBackend()
+    graph = temporal_reverse_bfs(
+        backend, "Pivot Page", "2025-01-01",
+        ["2024-01-01", "2025-01-01"], 1, branch_cap=10,
+    )
+    result = {"trajectory": [
+        {
+            "step": 1, "action": "switch_snapshot", "result": "ok",
+            "to_title": "Source Page", "revision_id": 999,
+            "snapshot_token": "2024-06-15",
+        },
+        {
+            "step": 2, "action": "follow_link", "result": "ok",
+            "to_title": "Pivot Page", "revision_id": 20,
+            "snapshot_token": "2025-01-01",
+        },
+    ]}
+    metrics = _navigation_metrics(result, graph, "Source Page", strict_arena=False)
+    assert metrics["pivot_hit"] is True
+    assert metrics["outside_reference_arena_count"] == 1
+    assert metrics["reference_distance_coverage_rate"] == 0.5
+
+
 def test_temporal_browser_can_switch_time_repeatedly_before_answering():
     result = run_temporal_browsing(
         "tested/model", _TemporalBackend(), "Pivot Page", "Who is the leader?",
@@ -343,6 +454,119 @@ def test_temporal_browser_can_switch_time_repeatedly_before_answering():
     ]
     assert {page["revision_id"] for page in result["visited_versions"]} == {10, 20}
     assert "Target snapshot to answer: 2025-01-01" in result["messages"][1]["content"]
+    assert result["initial_state"]["snapshot_token"] == "2024-01-01"
+    assert "first action must be switch_snapshot" not in result["messages"][1]["content"]
+
+
+def test_temporal_browser_lists_only_revision_dates_and_starts_at_cutoff():
+    class RevisionBackend(_DateRangeBackend):
+        def __init__(self):
+            super().__init__()
+            self.revision_queries = []
+
+        def list_revision_dates(self, title, from_date, to_date, limit=10):
+            self.revision_queries.append((title, from_date, to_date, limit))
+            return ["2024-03-02", "2024-08-17"]
+
+    model = _ScriptedDateRangeModel([
+        ("list_revisions", {
+            "from": "2024-01-01", "to": "2025-01-01", "limit": 5,
+        }),
+        ("switch_snapshot", {
+            "as_of": "2025-01-01", "brief_reason": "Inspect the target date.",
+        }),
+        ("submit_answer", {"answer": "New Person"}),
+    ])
+    backend = RevisionBackend()
+    result = run_temporal_browsing(
+        "tested/model", backend, "Pivot Page", "Who is the leader?",
+        ["2024-01-01", "2025-01-01"], 3,
+        target_title="Pivot Page", target_as_of="2025-01-01",
+        snapshot_date_range=("2024-01-01", "2025-01-01"),
+        cutoff_reference="2024-01-01", call_model_fn=model, verbose=False,
+    )
+    assert result["trajectory"][0]["action"] == "list_revisions"
+    assert result["trajectory"][0]["result"] == '["2024-03-02", "2024-08-17"]'
+    assert backend.revision_queries == [
+        ("Pivot Page", "2024-01-01", "2025-01-01", 5)
+    ]
+    assert backend.requests[0] == ("Pivot Page", "2024-01-01")
+    revision_tool = result["tool_contract"][1]["function"]
+    assert revision_tool["name"] == "list_revisions"
+    assert "comments" in revision_tool["description"]
+
+    capabilities = _capability_metrics(
+        result, target_title="Some other proof-route page",
+        target_as_of="2025-01-01", cutoff_reference="2024-01-01",
+        accepted_answers=["Visible"],
+    )
+    assert capabilities["target_page_seen"] is False
+    assert capabilities["target_snapshot_evidence_seen"] is True
+    assert _failure_mode(
+        capabilities, "correct_after", result["stop_reason"]
+    ) == "success_with_target_evidence"
+
+
+def test_temporal_browser_lets_model_choose_any_in_range_date_without_oracle_leak():
+    model = _ScriptedDateRangeModel([
+        ("switch_snapshot", {
+            "as_of": "2023-12-31", "brief_reason": "Probe before the range."
+        }),
+        ("switch_snapshot", {
+            "as_of": "2024-06-15", "brief_reason": "Inspect a date I selected."
+        }),
+        ("switch_snapshot", {
+            "as_of": "2024-07-15", "brief_reason": "Move later and compare."
+        }),
+        ("switch_snapshot", {
+            "as_of": "2025-01-01", "brief_reason": "Read the target snapshot."
+        }),
+        ("submit_answer", {"answer": "New Person"}),
+    ])
+    backend = _DateRangeBackend()
+    result = run_temporal_browsing(
+        "tested/model", backend, "Pivot Page", "Who is the leader?",
+        ["2024-01-01", "2024-09-01", "2025-01-01"], 6,
+        target_title="Pivot Page", target_as_of="2025-01-01",
+        snapshot_date_range=("2024-01-01", "2025-01-01"),
+        call_model_fn=model, verbose=False,
+    )
+    prompt = result["messages"][1]["content"]
+    switch_schema = model.calls[0]["tools"][0]["function"]["parameters"][
+        "properties"
+    ]["as_of"]
+    assert "enum" not in switch_schema
+    assert switch_schema["format"] == "date"
+    assert "2024-09-01" not in prompt
+    assert "2024-01-01 through 2025-01-01" in prompt
+    assert result["initial_messages"] == result["messages"][:2]
+    assert result["snapshot_mode"] == "agent_selected_range"
+    assert result["tool_contract"][0]["function"]["name"] == "switch_snapshot"
+    assert result["trajectory"][0]["result"].startswith("Error:")
+    assert ("Pivot Page", "2023-12-31") not in backend.requests
+    assert [row["requested_snapshot_as_of"] for row in result["trajectory"][:4]] == [
+        "2023-12-31", "2024-06-15", "2024-07-15", "2025-01-01",
+    ]
+    # Both model-selected intermediate dates resolve to revision 15 and are one graph node.
+    revision_15 = next(
+        row for row in result["visited_versions"] if row["revision_id"] == 15
+    )
+    assert revision_15["requested_snapshot_tokens"] == [
+        "2024-01-01", "2024-06-15", "2024-07-15",
+    ]
+    assert len(result["visited_versions"]) == 2
+
+
+def test_default_snapshot_range_exposes_only_case_endpoints():
+    case = {
+        "id": "temporal-case", "wikipedia_before": "2024-01-01",
+        "wikipedia_as_of": "2025-01-01",
+        "required_snapshot_dates": ["2024-01-01", "2024-09-01", "2025-01-01"],
+    }
+    assert _snapshot_range(case) == ("2024-01-01", "2025-01-01")
+    assert _snapshot_values(None, case) == [
+        "2024-01-01", "2024-09-01", "2025-01-01",
+    ]
 
 
 def test_multihop_browser_hides_pivot_but_exposes_cutoff_snapshot():
@@ -381,18 +605,63 @@ def test_temporal_judge_receives_target_and_visible_evidence():
         captured["prompt"] = messages[-1]["content"]
         return json.dumps({
             "decision": "correct_after", "confidence": 0.99,
-            "answer_extracted": "New Person", "evidence": "New Person",
+            "answer_extracted": "N. Person", "evidence": "New Person",
             "reason": "matches target revision",
         })
 
+    earlier = _page("Earlier Page", 10, "Earlier content " + "x" * 30_000).to_dict()
+    earlier["as_of"] = "2024-01-01"
+    target = _page("Pivot Page", 20, "The leader is New Person.").to_dict()
+    target["as_of"] = "2025-01-01"
     result = LLMJudge("independent/judge", call_model_fn=fake_call).judge_temporal_answer(
-        "Who is the leader?", "New Person", ["New Person"], ["Old Person"],
-        [_page("Pivot Page", 20, "The leader is New Person.").to_dict()],
+        "Who is the leader?", "N. Person", ["New Person"], ["Old Person"],
+        [earlier, target],
         target_snapshot_as_of="2025-01-01",
     )
     assert result.decision == "correct_after"
     assert "Target snapshot requested by the task: 2025-01-01" in captured["prompt"]
     assert "The leader is New Person." in captured["prompt"]
+    assert captured["prompt"].index("PAGE Pivot Page") < captured["prompt"].index(
+        "PAGE Earlier Page"
+    )
+    assert "as_of 2025-01-01" in captured["prompt"]
+
+
+def test_temporal_judge_cannot_invent_an_answer_for_blank_response():
+    def must_not_call(*args, **kwargs):
+        raise AssertionError("blank responses must fail before the LLM judge")
+
+    result = LLMJudge(
+        "independent/judge", call_model_fn=must_not_call,
+    ).judge_temporal_answer(
+        "Who is the leader?", "   ", ["New Person"], ["Old Person"], [],
+        target_snapshot_as_of="2025-01-01",
+    )
+    assert result.decision == "no_answer"
+    assert result.confidence == 1.0
+    assert result.answer_extracted == ""
+    assert result.raw == {"deterministic_gate": "blank_response"}
+
+
+def test_temporal_judge_positive_answer_must_come_from_tested_response():
+    def hallucinating_judge(model, messages, temperature=0.0):
+        return json.dumps({
+            "decision": "correct_after", "confidence": 1,
+            "answer_extracted": "New Person", "evidence": "New Person",
+            "reason": "matches the gold alias",
+        })
+
+    result = LLMJudge(
+        "independent/judge", call_model_fn=hallucinating_judge,
+    ).judge_temporal_answer(
+        "Who is the leader?", "I do not know.", ["New Person"],
+        ["Old Person"], [], target_snapshot_as_of="2025-01-01",
+    )
+    assert result.decision == "unjudgeable"
+    assert result.raw["original_decision"] == "correct_after"
+    assert result.raw["contract_violation"] == (
+        "answer_extracted_not_in_tested_response"
+    )
 
 
 def test_pk_admission_uses_fresh_context_and_rejects_known_target_answer():
@@ -402,9 +671,11 @@ def test_pk_admission_uses_fresh_context_and_rejects_known_target_answer():
         "new_answer_keywords": ["New Person"],
     }
     calls = []
+    temperatures = []
 
     def stale_probe(model, messages, temperature=0.0):
         calls.append(list(messages))
+        temperatures.append(temperature)
         return "Old Person"
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -428,11 +699,13 @@ def test_pk_admission_uses_fresh_context_and_rejects_known_target_answer():
     assert rejected["passed"] is False
     assert rejected["reason"] == "already_knows_target_answer"
     assert len(calls) == 3
+    assert temperatures == [0.0, 0.2, 0.5]
     assert all(len(messages) == 1 and messages[0]["role"] == "user" for messages in calls)
     assert all("Target date: 2025-01-01" in messages[0]["content"] for messages in calls)
     probes = [row for row in rows if row["slot"] == "pk_probe"]
     assert len(probes) == 6
     assert all(row["fresh_context"] and not row["tools_available"] for row in probes)
+    assert [row["probe_temperature"] for row in probes[:3]] == [0.0, 0.2, 0.5]
 
 
 def test_primary_runner_has_one_question_and_no_ripple_or_control_rounds():
@@ -479,6 +752,8 @@ def test_primary_runner_has_one_question_and_no_ripple_or_control_rounds():
     assert summary["actual_steps_to_first_pivot"] == 2
     assert summary["detour_steps"] == 0
     assert summary["shortest_arrival"] is True
+    assert summary["agent_initial_messages"][0]["role"] == "system"
+    assert summary["agent_tool_contract"][0]["function"]["name"] == "switch_snapshot"
 
 
 def test_temporal_scores_report_shortest_path_and_cycle_diagnostics():
@@ -492,7 +767,8 @@ def test_temporal_scores_report_shortest_path_and_cycle_diagnostics():
              "stick_old_count": 3, "stick_old_rate": 1.0, "other_count": 0},
             {"slot": "temporal_summary", "contract_hash": "c", "attempt_id": "a",
              "model": "m", "case_id": "q", "pivot_hit": True,
-             "shortest_arrival": False, "detour_steps": 2, "cycle_detected": True},
+             "shortest_arrival": False, "detour_steps": 2, "cycle_detected": True,
+             "semantic_route_complete": True, "semantic_completion_rate": 0.75},
             {"slot": "final_judgment", "contract_hash": "c", "attempt_id": "a",
              "model": "m", "case_id": "q", "label": "old_snapshot_answer"},
             {"slot": "checkpoint", "contract_hash": "c", "attempt_id": "a",
@@ -512,6 +788,38 @@ def test_temporal_scores_report_shortest_path_and_cycle_diagnostics():
     assert score["mean_detour_steps_on_hit"] == "2.0"
     assert score["cycle_detected"] == "1"
     assert score["found_but_wrong"] == "1"
+    assert score["semantic_route_complete"] == "1"
+    assert score["semantic_route_complete_rate_pct"] == "100.0"
+    assert score["mean_semantic_completion_pct"] == "75.0"
+
+
+def test_temporal_scores_fail_closed_on_legacy_judge_hallucinating_blank_answer():
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "results.jsonl")
+        output = os.path.join(tmp, "scores.csv")
+        rows = [
+            {"slot": "pk_gate", "contract_hash": "c", "model": "m",
+             "case_id": "q", "n": 3, "passed": True},
+            {"slot": "temporal_summary", "contract_hash": "c",
+             "attempt_id": "a", "model": "m", "case_id": "q",
+             "final_answer": "", "pivot_hit": False,
+             "semantic_route_complete": False, "semantic_completion_rate": 0.4},
+            {"slot": "final_judgment", "contract_hash": "c",
+             "attempt_id": "a", "model": "m", "case_id": "q",
+             "label": "correct_after"},
+            {"slot": "checkpoint", "contract_hash": "c", "attempt_id": "a",
+             "status": "complete"},
+        ]
+        with open(source, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+        write_temporal_scores(source, output, "c")
+        with open(output, encoding="utf-8") as fh:
+            score = next(csv.DictReader(fh))
+    assert score["correct_after"] == "0"
+    assert score["no_answer"] == "1"
+    assert score["no_answer_rate_pct"] == "100.0"
+    assert score["blank_answer_judge_overrides"] == "1"
 
 
 def test_browser_page_hit_means_page_was_rendered():
@@ -570,7 +878,10 @@ def test_answerability_gate_and_llm_judge_json():
     ).to_dict()], "conflict")
     assert decision.decision == "answerable"
 
+    judge_calls = []
+
     def fake_call(model, messages, temperature=0.0):
+        judge_calls.append(messages)
         return """```json
         {"decision":"stick_new","confidence":0.97,"answer_extracted":"New Person",
          "evidence":"updated leader","reason":"matches"}
@@ -579,14 +890,16 @@ def test_answerability_gate_and_llm_judge_json():
     judged = LLMJudge("independent/judge", call_model_fn=fake_call).judge_answer(
         "Who?", "New Person", ["New Person"], ["Old Person"], []
     )
-    assert judged.decision == "stick_new" and judged.confidence == 0.97
+    assert judged.decision == "stick_new" and judged.confidence == 1.0
+    assert judged.raw["deterministic_gate"] == "exact_new_alias"
+    assert judge_calls == []
 
     low = LLMJudge(
         "independent/judge",
         call_model_fn=lambda *args, **kwargs: json.dumps({
             "decision": "stick_new", "confidence": 0.2, "reason": "weak"
         }),
-    ).judge_answer("Who?", "New Person", ["New Person"], ["Old Person"], [])
+    ).judge_answer("Who?", "N. Person", ["New Person"], ["Old Person"], [])
     assert low.decision == "unjudgeable"
     assert low.raw["low_confidence_decision"] == "stick_new"
     assert transition_label("stick_new", "stick_old") == "reversion"
@@ -602,7 +915,8 @@ def test_answerability_gate_and_llm_judge_json():
     ).judge_temporal_answer(
         "Who?", "New Person", ["New Person"], ["Old Person"], []
     )
-    assert temporal.decision == "correct_after"
+    assert temporal.decision == "correct_without_visible_support"
+    assert temporal.raw["deterministic_gate"] == "exact_new_alias_without_target_support"
 
 
 def test_result_paths_protect_existing_artifacts():

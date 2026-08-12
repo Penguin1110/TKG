@@ -1,0 +1,271 @@
+{
+  "seeds": [
+    {
+      "id": "p286_england_national_under-21_football_team_lee_carsley_england_national_football_team_thomas_tuchel_p413_defender_association_football",
+      "model_id": "openai/gpt-4.1-mini",
+      "target_as_of": "2025-01-01",
+      "anchor_label": "England national under-21 football team",
+      "answer_kind": "What",
+      "category": "sports",
+      "old_answer_keywords": [
+        "Lee Carsley"
+      ],
+      "hops": [
+        {
+          "source_title": "England national under-21 football team",
+          "target_title": "Lee Carsley",
+          "relation": "head coach at registered knowledge cutoff",
+          "relative_clause": "the person who was head coach of {source} at the tested model's registered knowledge cutoff",
+          "as_of": "2024-06-01",
+          "evidence": "England Under-21 Nickname The Young Lions Association The Football Association Head coach Lee Carsley Most caps James Milner (46) Top scorer Eddie Nketiah (16) First colours Second colours First international England 0–0 Wales (Wolverhampton, England;",
+          "target_aliases": [
+            "Lee Carsley"
+          ]
+        },
+        {
+          "source_title": "Lee Carsley",
+          "target_title": "England national football team",
+          "relation": "later appointed head coach of football team",
+          "relative_clause": "the football team that later appointed {source} as head coach",
+          "as_of": "2024-08-09",
+          "evidence": "nd Height 1.77 m (5 ft 10 in) Position Defensive midfielder Team information Current team England national football team (interim head coach) Youth career 1992–1994 Derby County Senior career* Years Team Apps (Gls) 1994–1999 Derby County 138 (5) 1999–2000 Blackburn Rove",
+          "target_aliases": [
+            "England national football team"
+          ]
+        },
+        {
+          "source_title": "England national football team",
+          "target_title": "Thomas Tuchel",
+          "relation": "head coach at target snapshot",
+          "relative_clause": "the head coach of {source}",
+          "as_of": "2025-01-01",
+          "evidence": "Lions Association The Football Association(The FA) Confederation UEFA (Europe) Head coach Thomas Tuchel Captain Harry Kane Most caps Peter Shilton (125) Top scorer Harry Kane (69) Home stadium Wembley Stadium FIFA code ENG First colours Second colours F",
+          "target_aliases": [
+            "Thomas Tuchel"
+          ]
+        },
+        {
+          "source_title": "Thomas Tuchel",
+          "target_title": "Defender (association football)",
+          "relation": "playing position",
+          "relative_clause": "the playing position of {source}",
+          "as_of": "2025-01-01",
+          "evidence": "9) 29 August 1973 (age 52) Place of birth Krumbach, West Germany Height 1.92 m (6 ft 4 in) Position Defender Team information Current team England (head coach) Youth career 1979–1988 TSV Krumbach 1988–1992 FC Augsburg Senior career* Years Team Apps (Gls) 1992–1994 Stuttgarter Kickers 8 (",
+          "target_aliases": [
+            "Defender"
+          ],
+          "incoming_time_policy": "same_snapshot",
+          "property_id": "P413",
+          "relation_family": "sports",
+          "structured_evidence": {
+            "source": "wikidata_statement",
+            "source_qid": "Q702233",
+            "target_qid": "Q336286",
+            "property_id": "P413",
+            "selector": "single",
+            "qualifier_dates": {}
+          }
+        }
+      ],
+      "selection_metadata": {
+        "relation_family": "sports",
+        "property_id": "P413",
+        "source_entity": "Thomas Tuchel",
+        "target_entity": "Defender (association football)",
+        "popularity_month": "2026-07",
+        "source_pageviews": 1484742,
+        "target_pageviews": 0,
+        "spine_popularity": {
+          "month": "2026-07",
+          "score": 2914337,
+          "max_entity_views": 1484742,
+          "entity_views": {
+            "England national under-21 football team": 0,
+            "Lee Carsley": 0,
+            "England national football team": 1429595,
+            "Thomas Tuchel": 1484742
+          }
+        }
+      }
+    },
+    {
+      "id": "p286_tottenham_hotspur_fc_ange_postecoglou_nottingham_forest_fc_sean_dyche_p19_kettering",
+      "model_id": "openai/gpt-4.1-mini",
+      "target_as_of": "2025-10-21",
+      "anchor_label": "Tottenham Hotspur F.C.",
+      "answer_kind": "What",
+      "category": "sports",
+      "old_answer_keywords": [
+        "Ange Postecoglou"
+      ],
+      "hops": [
+        {
+          "source_title": "Tottenham Hotspur F.C.",
+          "target_title": "Ange Postecoglou",
+          "relation": "head coach at registered knowledge cutoff",
+          "relative_clause": "the person who was head coach of {source} at the tested model's registered knowledge cutoff",
+          "as_of": "2024-06-01",
+          "evidence": "um Capacity 62,850 Owner ENIC International Ltd. (86.58%) Chairman Daniel Levy Head coach Ange Postecoglou League Premier League 2025–26 Premier League, 17th of 20 Website https://www.tottenhamhotspur.com/ Home colours Away colours Third colours Current se",
+          "target_aliases": [
+            "Ange Postecoglou"
+          ]
+        },
+        {
+          "source_title": "Ange Postecoglou",
+          "target_title": "Nottingham Forest F.C.",
+          "relation": "later appointed head coach of football team",
+          "relative_clause": "the football team that later appointed {source} as head coach",
+          "as_of": "2025-09-09",
+          "evidence": "C. 6 June 2025. Retrieved 6 June 2025. ^ \"Forest appoint Ange Postecoglou as Head Coach\". Nottingham Forest F.C. 9 September 2025. Retrieved 9 September 2025. ^ Smith, Pete (12 June 2014). \"Ange Postecoglou: I thought football would die in Australia\". The Guardi",
+          "target_aliases": [
+            "Nottingham Forest F.C."
+          ]
+        },
+        {
+          "source_title": "Nottingham Forest F.C.",
+          "target_title": "Sean Dyche",
+          "relation": "head coach at target snapshot",
+          "relative_clause": "the head coach of {source}",
+          "as_of": "2025-10-21",
+          "evidence": "Ground Capacity 30,455 Owner Evangelos Marinakis Chairman Nicholas Randall KC Head coach Sean Dyche League Premier League 2025–26 Premier League, 16th of 20 Website nottinghamforest.co.uk Home colours Away colours Third colours Current season Active",
+          "target_aliases": [
+            "Sean Dyche"
+          ]
+        },
+        {
+          "source_title": "Sean Dyche",
+          "target_title": "Kettering",
+          "relation": "place of birth",
+          "relative_clause": "the place of birth of {source}",
+          "as_of": "2025-10-21",
+          "evidence": "formation Full name Sean Mark Dyche Date of birth (1971-06-28) 28 June 1971 (age 55) Place of birth Kettering, England Height 6 ft 0 in (1.83 m) Position Centre-back Team information Current team Nottingham Forest (manager) Youth career 1987–1989 Nottingham Forest Senior career* Years Tea",
+          "target_aliases": [
+            "Kettering"
+          ],
+          "incoming_time_policy": "same_snapshot",
+          "property_id": "P19",
+          "relation_family": "geography",
+          "structured_evidence": {
+            "source": "wikidata_statement",
+            "source_qid": "Q10599",
+            "target_qid": "Q984613",
+            "property_id": "P19",
+            "selector": "single",
+            "qualifier_dates": {}
+          }
+        }
+      ],
+      "selection_metadata": {
+        "relation_family": "geography",
+        "property_id": "P19",
+        "source_entity": "Sean Dyche",
+        "target_entity": "Kettering",
+        "popularity_month": "2026-07",
+        "source_pageviews": 0,
+        "target_pageviews": 0,
+        "spine_popularity": {
+          "month": "2026-07",
+          "score": 433118,
+          "max_entity_views": 433118,
+          "entity_views": {
+            "Tottenham Hotspur F.C.": 433118,
+            "Ange Postecoglou": 0,
+            "Nottingham Forest F.C.": 0,
+            "Sean Dyche": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "p286_tottenham_hotspur_fc_ange_postecoglou_nottingham_forest_fc_sean_dyche_p54_northampton_town_f_c",
+      "model_id": "openai/gpt-4.1-mini",
+      "target_as_of": "2025-10-21",
+      "anchor_label": "Tottenham Hotspur F.C.",
+      "answer_kind": "What",
+      "category": "sports",
+      "old_answer_keywords": [
+        "Ange Postecoglou"
+      ],
+      "hops": [
+        {
+          "source_title": "Tottenham Hotspur F.C.",
+          "target_title": "Ange Postecoglou",
+          "relation": "head coach at registered knowledge cutoff",
+          "relative_clause": "the person who was head coach of {source} at the tested model's registered knowledge cutoff",
+          "as_of": "2024-06-01",
+          "evidence": "um Capacity 62,850 Owner ENIC International Ltd. (86.58%) Chairman Daniel Levy Head coach Ange Postecoglou League Premier League 2025–26 Premier League, 17th of 20 Website https://www.tottenhamhotspur.com/ Home colours Away colours Third colours Current se",
+          "target_aliases": [
+            "Ange Postecoglou"
+          ]
+        },
+        {
+          "source_title": "Ange Postecoglou",
+          "target_title": "Nottingham Forest F.C.",
+          "relation": "later appointed head coach of football team",
+          "relative_clause": "the football team that later appointed {source} as head coach",
+          "as_of": "2025-09-09",
+          "evidence": "C. 6 June 2025. Retrieved 6 June 2025. ^ \"Forest appoint Ange Postecoglou as Head Coach\". Nottingham Forest F.C. 9 September 2025. Retrieved 9 September 2025. ^ Smith, Pete (12 June 2014). \"Ange Postecoglou: I thought football would die in Australia\". The Guardi",
+          "target_aliases": [
+            "Nottingham Forest F.C."
+          ]
+        },
+        {
+          "source_title": "Nottingham Forest F.C.",
+          "target_title": "Sean Dyche",
+          "relation": "head coach at target snapshot",
+          "relative_clause": "the head coach of {source}",
+          "as_of": "2025-10-21",
+          "evidence": "Ground Capacity 30,455 Owner Evangelos Marinakis Chairman Nicholas Randall KC Head coach Sean Dyche League Premier League 2025–26 Premier League, 16th of 20 Website nottinghamforest.co.uk Home colours Away colours Third colours Current season Active",
+          "target_aliases": [
+            "Sean Dyche"
+          ]
+        },
+        {
+          "source_title": "Sean Dyche",
+          "target_title": "Northampton Town F.C.",
+          "relation": "most recent sports team represented as a player",
+          "relative_clause": "the most recent sports team represented as a player by {source}",
+          "as_of": "2025-10-21",
+          "evidence": "17 (0) 1999 → Luton Town (loan) 14 (1) 1999–2002 Millwall 69 (3) 2002–2005 Watford 72 (0) 2005–2007 Northampton Town 56 (0) Total 459 (12) Managerial career 2011–2012 Watford 2012–2022 Burnley 2023–2025 Everton 2025– Nottingham Forest * Club domestic league appearances and goals Sean Mark Dyche",
+          "target_aliases": [
+            "Northampton Town"
+          ],
+          "incoming_time_policy": "same_snapshot",
+          "property_id": "P54",
+          "relation_family": "sports",
+          "structured_evidence": {
+            "source": "wikidata_statement",
+            "source_qid": "Q10599",
+            "target_qid": "Q48945",
+            "property_id": "P54",
+            "selector": "latest_end",
+            "qualifier_dates": {
+              "P580": "2005-01-01",
+              "P582": "2007-01-01"
+            }
+          }
+        }
+      ],
+      "selection_metadata": {
+        "relation_family": "sports",
+        "property_id": "P54",
+        "source_entity": "Sean Dyche",
+        "target_entity": "Northampton Town F.C.",
+        "popularity_month": "2026-07",
+        "source_pageviews": 0,
+        "target_pageviews": 0,
+        "spine_popularity": {
+          "month": "2026-07",
+          "score": 433118,
+          "max_entity_views": 433118,
+          "entity_views": {
+            "Tottenham Hotspur F.C.": 433118,
+            "Ange Postecoglou": 0,
+            "Nottingham Forest F.C.": 0,
+            "Sean Dyche": 0
+          }
+        }
+      }
+    }
+  ]
+}

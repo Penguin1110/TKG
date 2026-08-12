@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const COLORS = {
   edge: "#35505a", edgeHover: "#789ba6", node: "#42b8c8", stub: "#72838b",
   trajectoryOnly: "#9c769d", temporal: "#b083d1", path: "#e6a43a", current: "#ed6b4f", target: "#4d9d76",
+  waypoint: "#f2cf5b",
   label: "#d9e7ea", ink: "#10212b"
 };
 
@@ -177,12 +178,37 @@ function selectTrajectory(id) {
       [state.trajectory.reasoning_hop_count
         ? `${state.trajectory.reasoning_hop_count}-hop relative`
         : "direct question", !!state.trajectory.reasoning_hop_count],
+      [state.trajectory.relation_families?.length
+        ? `tail ${state.trajectory.relation_families.join("+")}` : "tail n/a",
+        !!state.trajectory.relation_families?.length],
       [state.trajectory.target_title_revealed === false ? "pivot hidden" : "pivot revealed",
         state.trajectory.target_title_revealed === false],
+      [state.trajectory.snapshot_mode === "agent_selected_range"
+        ? `model time ${state.trajectory.snapshot_range?.start ?? "?"}…${state.trajectory.snapshot_range?.end ?? "?"}`
+        : "fixed time list", state.trajectory.snapshot_mode === "agent_selected_range"],
       [state.trajectory.page_hit ? "pivot hit" : "pivot miss", state.trajectory.page_hit],
-      [state.trajectory.shortest_arrival ? "shortest path" : `detour ${state.trajectory.detour_steps ?? "—"}`, state.trajectory.shortest_arrival],
+      [state.trajectory.revision_discovery_attempts
+        ? `revision dates ${state.trajectory.revision_discovery_successes}/${state.trajectory.revision_discovery_attempts}`
+        : "revision dates unused", state.trajectory.revision_discovery_successes > 0],
+      [state.trajectory.temporal_switch_successes
+        ? `time switches ${state.trajectory.temporal_switch_successes}`
+        : "no time switch", state.trajectory.temporal_switch_successes > 0],
+      [state.trajectory.hyperlink_follow_successes
+        ? `links followed ${state.trajectory.hyperlink_follow_successes}`
+        : "no link followed", state.trajectory.hyperlink_follow_successes > 0],
+      [state.trajectory.target_snapshot_evidence_seen
+        ? "target evidence seen" : "target evidence missing",
+        state.trajectory.target_snapshot_evidence_seen],
+      [state.trajectory.semantic_waypoint_count
+        ? `reference route ${state.trajectory.semantic_waypoints_completed ?? 0}/${state.trajectory.semantic_waypoint_count}`
+        : "reference route n/a", state.trajectory.reference_route_match === true],
+      [state.trajectory.snapshot_mode === "agent_selected_range"
+        ? `reference coverage ${Math.round(100 * (state.trajectory.reference_distance_coverage_rate ?? 0))}%`
+        : (state.trajectory.shortest_arrival ? "raw shortest" : `raw detour ${state.trajectory.detour_steps ?? "—"}`),
+        state.trajectory.snapshot_mode === "agent_selected_range"
+          ? state.trajectory.outside_reference_arena_count === 0 : state.trajectory.shortest_arrival],
       [state.trajectory.cycle_detected ? `cycle/revisit ${state.trajectory.revisit_count}` : "no revisit", !state.trajectory.cycle_detected],
-      [state.trajectory.outcome_stage || "temporal answer", false],
+      [state.trajectory.failure_mode || state.trajectory.outcome_stage || "temporal answer", false],
       [state.trajectory.outcome_reason || "unclassified", state.trajectory.outcome_reason === "correct_after"]
     ] : [
       [state.trajectory.completed ? "complete" : "partial", state.trajectory.completed],
@@ -250,10 +276,13 @@ function updateTimeline() {
     return;
   }
   const event = t.events[state.cursor - 1];
-  $("event-title").textContent = `Step ${event.step ?? state.cursor} · ${event.action} · ${event.from_title}${event.moved ? ` → ${event.to_title}` : ""}`;
+  const selectedDate = event.action === "switch_snapshot"
+    ? ` · ${event.requested_snapshot_as_of || event.snapshot_token || "unknown date"}` : "";
+  $("event-title").textContent = `Step ${event.step ?? state.cursor} · ${event.action}${selectedDate} · ${event.from_title}${event.moved ? ` → ${event.to_title}` : ""}`;
   const progress = event.navigation_step != null
     ? `nav ${event.navigation_step} · d→pivot ${event.distance_to_pivot ?? "outside"}${event.revisited ? " · revisited" : ""} · ` : "";
-  $("event-result").textContent = progress + (event.result || event.free_text || "No tool output recorded.");
+  const reason = event.brief_reason ? `reason: ${event.brief_reason} · ` : "";
+  $("event-result").textContent = progress + reason + (event.result || event.free_text || "No tool output recorded.");
 }
 
 function advance(delta) {
@@ -346,13 +375,14 @@ function draw(now) {
   state.visibleNodes.forEach(node=>{
     const active=path.nodes.has(node.id),current=node.id===currentId,selected=node.id===state.selected?.id,hover=node.id===hoverId;
     const isPivot=node.id===state.trajectory?.pivot_node_id;
+    const isWaypoint=(state.trajectory?.semantic_waypoint_node_ids||[]).includes(node.id);
     const revealAlpha=Math.min(1,Math.max(.08,(now-(state.nodeRevealAt.get(node.id)||0))/420));
     const pulse=current?(1+Math.sin(now/180)*.16):1; const radius=node.radius*pulse;
     if(current){ctx.globalAlpha=.2*revealAlpha;ctx.fillStyle=COLORS.current;ctx.beginPath();ctx.arc(node.x,node.y,radius+10/state.view.scale,0,Math.PI*2);ctx.fill();}
-    ctx.globalAlpha=revealAlpha;ctx.fillStyle=current?COLORS.current:(isPivot?COLORS.target:(active?COLORS.path:(node.trajectory_only?COLORS.trajectoryOnly:(node.cached?COLORS.node:COLORS.stub))));
+    ctx.globalAlpha=revealAlpha;ctx.fillStyle=current?COLORS.current:(isPivot?COLORS.target:(active?COLORS.path:(isWaypoint?COLORS.waypoint:(node.trajectory_only?COLORS.trajectoryOnly:(node.cached?COLORS.node:COLORS.stub)))));
     ctx.beginPath();ctx.arc(node.x,node.y,radius,0,Math.PI*2);ctx.fill();
     ctx.lineWidth=(selected||hover?2.2:1)/state.view.scale;ctx.strokeStyle=selected?"#fff":(hover?COLORS.gold:"#0b1820");ctx.stroke();
-    if(state.view.scale>.7||active||hover||selected||isPivot){ctx.globalAlpha=revealAlpha*(active||hover||selected||isPivot?1:.72);ctx.fillStyle=COLORS.label;ctx.font=`${active||isPivot?600:400} ${Math.max(9,11/state.view.scale)}px system-ui`;ctx.textAlign="center";ctx.fillText(node.title,node.x,node.y+radius+13/state.view.scale);}
+    if(state.view.scale>.7||active||hover||selected||isPivot||isWaypoint){ctx.globalAlpha=revealAlpha*(active||hover||selected||isPivot||isWaypoint?1:.72);ctx.fillStyle=COLORS.label;ctx.font=`${active||isPivot||isWaypoint?600:400} ${Math.max(9,11/state.view.scale)}px system-ui`;ctx.textAlign="center";ctx.fillText(node.title,node.x,node.y+radius+13/state.view.scale);}
   });
   if(state.playing&&state.trajectory){const event=state.trajectory.events[state.cursor];if(event){const a=state.nodeById.get(event.from_node_id),b=state.nodeById.get(event.to_node_id);if(a&&b&&state.visibleIds.has(a.id)&&state.visibleIds.has(b.id)){const t=event.moved?state.eventProgress:0;const x=a.x+(b.x-a.x)*t,y=a.y+(b.y-a.y)*t;ctx.globalAlpha=1;ctx.fillStyle="#fff3cf";ctx.beginPath();ctx.arc(x,y,5.5/state.view.scale,0,Math.PI*2);ctx.fill();ctx.strokeStyle=COLORS.current;ctx.lineWidth=2/state.view.scale;ctx.stroke();}}}
   ctx.restore();ctx.globalAlpha=1;
@@ -369,7 +399,7 @@ function fitGraph(ids=null, animate=false) {
 function hitTest(clientX,clientY){const rect=canvas.getBoundingClientRect(),world=screenToWorld(clientX-rect.left,clientY-rect.top);let hit=null,best=Infinity;state.visibleNodes.forEach(n=>{const d=Math.hypot(n.x-world.x,n.y-world.y);if(d<(n.radius+7/state.view.scale)&&d<best){hit=n;best=d;}});return hit;}
 
 function trajectoryDistance(node){return state.trajectory?.distance_by_node_id?.[node.id]??node.distance_to_pivot??null;}
-function showTooltip(node,event){if(!node){$("tooltip").hidden=true;return;}$("tooltip-title").textContent=node.title;$("tooltip-meta").textContent=`${node.cached?"cached":"unresolved"} · rev ${node.revision_id??"—"} · ${node.timestamp??node.snapshot_group??"unknown time"} · d→pivot ${trajectoryDistance(node)??"—"} · in ${node.in_degree} / out ${node.out_degree}`;$("tooltip-excerpt").textContent=node.excerpt||"No excerpt stored.";const tip=$("tooltip");tip.hidden=false;let left=event.clientX+16,top=event.clientY+16;if(left+285>innerWidth)left=event.clientX-285;if(top+160>innerHeight)top=event.clientY-165;tip.style.left=`${left}px`;tip.style.top=`${top}px`;}
+function showTooltip(node,event){if(!node){$("tooltip").hidden=true;return;}const waypoint=(state.trajectory?.semantic_waypoint_node_ids||[]).indexOf(node.id);$("tooltip-title").textContent=node.title;$("tooltip-meta").textContent=`${node.cached?"cached":"unresolved"} · rev ${node.revision_id??"—"} · ${node.timestamp??node.snapshot_group??"unknown time"} · d→pivot ${trajectoryDistance(node)??"—"}${waypoint>=0?` · waypoint ${waypoint+1}`:""} · in ${node.in_degree} / out ${node.out_degree}`;$("tooltip-excerpt").textContent=node.excerpt||"No excerpt stored.";const tip=$("tooltip");tip.hidden=false;let left=event.clientX+16,top=event.clientY+16;if(left+285>innerWidth)left=event.clientX-285;if(top+160>innerHeight)top=event.clientY-165;tip.style.left=`${left}px`;tip.style.top=`${top}px`;}
 function showDetails(node){state.selected=node;$("empty-details").hidden=!!node;$("node-details").hidden=!node;if(!node)return;$("detail-title").textContent=node.title;$("detail-revision").textContent=node.revision_id??"not cached";$("detail-timestamp").textContent=node.timestamp??node.snapshot_group;$("detail-degree").textContent=`d→pivot ${trajectoryDistance(node)??"—"} · ${node.in_degree} in / ${node.out_degree} out · ${node.external_link_count||0} external`;$("detail-excerpt").textContent=node.excerpt||"No excerpt stored.";const link=$("detail-link");link.hidden=!node.source_url;if(node.source_url)link.href=node.source_url;}
 
 function focusNode(node){showDetails(node);const rect=canvas.getBoundingClientRect();state.view.scale=Math.max(1.25,state.view.scale);state.view.x=rect.width/2-node.x*state.view.scale;state.view.y=(rect.height-50)/2-node.y*state.view.scale;}

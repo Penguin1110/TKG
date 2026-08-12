@@ -18,15 +18,16 @@ navigation；不使用 ripple、control、distractor 或多輪 reversion protoco
 ```text
 指定被測 model，從 pinned cutoff registry 取得候選 cutoff 日期
   ↓
-提供一條 2–6 hop 的語意關係 seed
+以通過 relation profile 的 Wikidata 時間 qualifiers 做 bounded temporal beam search，
+或提供一條 2–6 hop seed
   ↓
 逐跳抓指定日期 Wikipedia revision
   ↓
-逐跳驗證 verbatim evidence + 真實 hyperlink + chain connectivity
+逐跳驗證 verbatim evidence + 真實 hyperlink + 舊版尚未出現下一 target
   ↓
-把關係反向巢狀組合成相對時間問題，隱藏所有中間 entity 與答案
+把每個 relation 寫成一個短步驟，隱藏所有中間 entity 與答案；另存 nested canonical form 稽核
   ↓
-以 target pivot revision 建 bounded reverse BFS，確認 declared chain 是最短路徑
+建立 product-graph semantic waypoints；另算 raw hyperlink shortest 作診斷
   ↓
 獨立 LLM multi-hop semantic judge
   ↓
@@ -34,13 +35,13 @@ navigation；不使用 ripple、control、distractor 或多輪 reversion protoco
   ↓
 只保留不知道 target answer 的題目 × 模型配對
   ↓
-固定從關係鏈 anchor page 開始，pivot title 不提供給模型
+從關係鏈 anchor page 的 cutoff revision 開始，pivot title 不提供給模型
   ↓
-反覆 switch_snapshot / follow_link
+按需 list_revisions / switch_snapshot / follow_link
   ↓
 submit_answer
   ↓
-獨立 LLM answer judge
+accepted-alias deterministic judge；只有模糊回答才呼叫獨立 LLM judge
   ↓
 JSONL、score CSV、動態 trajectory viewer
 ```
@@ -64,10 +65,13 @@ cp .env.example .env
   "wikipedia_as_of": "2026-01-01",
   "start_title": "Example Corp",
   "hide_pivot_title": true,
-  "temporal_question": "At the target snapshot, who is the former spouse of the spouse of the second successor as chief executive officer to the person who was chief executive officer of Example Corp at the tested model's registered knowledge cutoff?",
+  "temporal_question": "Start with Example Corp. First, identify the person who was its chief executive officer at the registered cutoff. Next, identify that person's second successor. Next, identify that person's spouse. At the target snapshot, who is that person's former spouse?",
   "new_answer_keywords": ["Former spouse"],
   "reasoning_hop_count": 4,
-  "expected_navigation_distance": 5,
+  "expected_navigation_distance": 7,
+  "required_temporal_switches": 3,
+  "semantic_shortest_distance": 7,
+  "temporal_waypoints": ["ordered (entity, revision, as_of) records omitted here"],
   "knowledge_cutoff": {"cutoff_date": "2024-06-01", "model_ids": ["openai/gpt-4.1-mini"]},
   "reasoning_chain": ["full revision/link/evidence records omitted here"]
 }
@@ -90,6 +94,179 @@ PK admission 才是正式 gate。未知 model ID 會 fail closed，不猜日期�
 - 含一個 `{source}` 的 `relative_clause`，供程式組合問題。
 - source revision 的逐字 `evidence` 與 `target_aliases`。
 
+每個相鄰 hop 必須換到更晚的日期，因此正式鏈固定交錯：
+
+```text
+H -> T -> H -> T -> H ...
+```
+
+先用 Wikidata `P286` 的 `start time` / `end time` 找教練跨隊候選，再以 exact Wikipedia
+revision 做 deterministic 驗證：
+
+```bash
+uv run tkg-discover-temporal-candidates \
+  --model-id openai/gpt-4.1-mini \
+  --popularity-month 2026-07 \
+  --popular-prefilter 100 \
+  --tails-per-entity 2 \
+  --max-per-relation-family 4 \
+  --max-per-property 1 \
+  --output discovered_multihop_seeds.json \
+  --packets-output candidate_discovery_packets.jsonl
+```
+
+候選事件日期會測試 `+0/+1/+3/+7` 日，處理 Wikidata 生效日與 Wikipedia 更新日的落差。
+只有 cutoff 頁有第一個人、換時間後才出現下一 entity、再次換時間後才出現答案的鏈會輸出。
+不同日期若解析到同一個 immutable revision，只會下載並 parse 一次；其後以 revision ID
+重用正文與 hyperlinks。attribute-tail 的 property/family quota 填滿後 discovery 會提早停止，
+而且每完成一個候選就立即 flush discovery packet，長時間執行時可以直接追蹤進度。
+
+### Renewable temporal relation registry
+
+Temporal relations 不再只存在於 Python 分支。版本化 bootstrap registry 目前包含 leadership、
+politics、career、sports、affiliation、education、family、geography、ownership、organization、
+awards 與 participation 等 24 個 entity-valued Wikidata properties。先用 profiler 對指定時間窗
+取樣，再以少量 Wikipedia revisions 測量實際 hyperlink yield：
+
+```bash
+uv run tkg-profile-temporal-relations \
+  --since 2024-06-01 \
+  --until 2026-08-12 \
+  --properties P286,P169,P488,P6,P35,P108,P54,P26 \
+  --kg-limit 10 \
+  --time-buckets 3 \
+  --wiki-samples 2 \
+  --judge-model openai/gpt-4.1 \
+  --judge-workers 4 \
+  --mine-properties 50 \
+  --output temporal_relation_profile.json \
+  --packets-output temporal_relation_profile_packets.jsonl
+```
+
+輸出逐 relation 保存 KG 候選數、日期 qualifier 完整度、Wikipedia hyperlink 支援率、
+前一日 novelty 與 promotion recommendation。新 property 只能成為 `discovered`；link gate
+達到門檻也只會成為 `wikipedia_link_candidate_semantic_review_required`，必須再通過 relation
+語意審核。指定 `--judge-model` 時，link-supported samples 會用內容雜湊快取及 bounded
+`--judge-workers` 並行審核；API failure 與 semantic reject 分開統計。通過後仍只會成為
+`semantic_validated_candidate_human_review_required`，profiler 本身不會改寫 registry 或放寬正式題目 gates。新 property discovery
+使用 bounded Wikidata RecentChanges sample，不以昂貴的全域 WDQS aggregate 阻塞既有 relation profiling。
+長時間窗若只用 `--time-buckets 1`，`ORDER BY` 會偏向窗口末端；正式 renewable run 應固定
+2–4 個時間桶，使早／中／晚事件都有 bounded 配額。每個桶的日期範圍、limit 與 query hash
+都併入 profile query manifest。
+
+### Registry renewal
+
+Profiler 的 `property_mining.candidates` 不再是死路。renewal command 會把新 property 以
+`discovered` 狀態寫入一個**新的**版本化 registry；之後可在下一個 profiling window 對它
+取樣。通過 Wikipedia link 與 semantic judge 的 relation 先成為 `validated`，只有明確列入
+`--activate-properties` 才成為 `active`：
+
+```bash
+uv run tkg-renew-relation-registry \
+  --profile temporal_relation_profile.json \
+  --registry-version renewal-2026-08-12 \
+  --activate-properties P286,P6,P35 \
+  --output temporal_relations.renewed.json
+```
+
+若 preregistration 明確採用全自動 semantic-threshold promotion，可改傳
+`--activate-validated`；輸出 provenance 會記錄這個 policy，不會把自動 promotion 當成人工
+review。未經 semantic validation 的 `discovered` relation 無法啟用。每次輸出保存 base
+registry version、所有 profile SHA-256、promotion decisions 與 deprecated properties。
+
+### Renewable multi-hop question engine
+
+正式 renewable engine 直接讀取一個或多個 immutable relation profiles，而不是固定 P286
+分支。預設 contract 是 4–5 relation hops、至少 2 個 relation families、每換一個 entity 後
+snapshot 必須嚴格往後、至少 2 次 temporal switches、同一 temporal property 最多使用 3 次、不可重複
+entity：
+
+```bash
+uv run tkg-renew-questions \
+  --model-id openai/gpt-4.1-mini \
+  --registry temporal_relations.renewed.json \
+  --profile temporal_relation_profile.json \
+  --until 2026-08-12 \
+  --popularity-month 2026-07 \
+  --judge-model openai/gpt-4.1 \
+  --judge-workers 4 \
+  --ledger-path renewable_question_ledger.db \
+  --seeds-output renewable_multihop_seeds.json \
+  --packets-output renewable_question_packets.jsonl \
+  --cases-output renewable_generated_cases.json
+```
+
+CLI 只接受 registry 中 `active` 且 profile recommendation 已通過 semantic validation 的交集；
+只有 profile pass、但尚未經 renewal activation 的 relation 不會進入正式出題搜尋。
+
+搜尋同時支援兩個有明確語意的方向：
+
+```text
+forward: team --P286--> coach
+inverse: coach --inverse(P286)--> the next team that appointed that coach
+```
+
+inverse 不是把箭頭偷偷倒過來；registry 必須提供 `inverse_relative_clause` 與 answer kind，
+Wikidata statement 仍保存原始 subject/object/direction。每條後續 edge 只考慮目前 snapshot
+之後最早的 `start time` 或 `point in time`。同日多個 target、日期缺少日精度、無 enwiki
+sitelink 或新版沒有真實 hyperlink 都會 fail closed。若 target hyperlink 在舊 revision 已因
+其他歷史角色出現，預設仍拒絕；formal mode 可由 cached edge-contrast judge 證明「新版明確
+表達指定 relation、舊版沒有表達同一 relation」後放行。這個 override 保存 before/after
+revision IDs、逐字 evidence、judge model/confidence/reason 與 raw-response hash，正式 validator
+會重新核對，不能只在 seed 裡寫一個 `pass`。
+`selection_policy` 明確區分 `single_active`、`latest_start` 與 `latest_point`，避免把多值
+property 任選成唯一答案。
+
+預設允許在至少 3 個嚴格遞增的 temporal hops 後接一個同 snapshot attribute tail；tail 仍需
+Wikidata cardinality selector、真實 revision hyperlink、逐字 evidence、無 entity cycle，且
+必須讓全題達到 relation-family diversity。可用 `--no-terminal-attribute-tails` 要求所有 hops
+都必須是 temporal；這個較嚴格設定可能在短 cutoff window 得到零題，零 yield 會原樣回報。
+預設也排除 `easy` tails（citizenship、birthplace、native language），優先 education、career、
+team、party、award、membership 等較難由人物先驗猜中的答案；只有顯式傳
+`--allow-easy-tails` 才會重新納入。
+
+候選通過 beam search 後仍須依序通過：
+
+```text
+MultiHopSeed contract
+  → exact revision/evidence/hyperlink gates
+  → bounded arena semantic-shortest audit
+  → independent whole-chain LLM judge
+  → machine_pass_human_review_required
+  → runner 的 per-model fresh-context PK admission
+```
+
+生成資料的三層 LLM gate（relation profile、before/after edge contrast、whole-chain）都要求固定名稱的
+boolean `checks` 全為 true；只回 `decision=pass`、缺欄位或回自由格式陣列都會 fail closed。
+prompt version 會進 cache key，修改 judge contract 不會沿用舊判定。
+
+`renewable_question_ledger.db` 以 model cutoff、QID path、property＋direction sequence、snapshot
+dates 與 answer QID 建 content fingerprint。改寫題目文字不會製造假新題；deterministic/judge
+reject 與已接受題目預設不再生成，API/網路 failure 則可重試。`--retry-rejected` 是明確的
+再審政策。seed artifact 保存 registry/profile hashes、搜尋 contract、beam score、完整 QID path
+與 qualifiers；JSONL 保存所有 anchor/expansion rejection reason。只想稽核 discovery 而不花
+judge 費用可傳 `--seeds-only`。
+
+這個 engine 產生的是等待 review 的 case，不宣稱模型必然不知道答案；正式未知性仍由下游
+PK admission 對每個「題目 × 被測模型」獨立判定。
+
+預設出題不是停在最後找到的人物，而是在 target snapshot 接一個經驗證的 attribute tail。
+白名單包含 birthplace/citizenship、education、employer/position、sports team、political
+party、spouse、award 與 organization membership；其中前述 `easy` 類別預設不取樣。每個 tail 必須同時具備：
+
+- Wikidata statement 與明確的 `single` / `current` / `latest` selector；多答案無法唯一化就拒絕。
+- target Wikipedia revision 內真的可見的 target hyperlink 與逐字 evidence。
+- target entity 自己也有 Wikipedia page，並且不造成 entity cycle。
+
+候選 spine 先以 Wikimedia Analytics API 的固定月份 top-pageviews 排序；輸出保存月份與各
+entity views。最後的 sampler 同時對 property ID、relation family、property sequence 與 anchor/source entity 設硬上限，
+避免熱門題全部集中在 birthplace、spouse 或同一人物。若要重播舊 P286-only 行為，可傳
+`--no-attribute-tails`；若
+刻意不要熱門度排序，必須顯式傳 `--no-popularity-ranking`。
+
+一組以 2026-07 pageviews 固定、經 deterministic gates 與獨立 LLM judge 通過的實例在
+`examples/popular_diverse/`；其中保留 seeds、discovery packets、cases 與 validation packets。
+
 程式不把「有 hyperlink」自行解讀成 spouse／successor；relation seed 提出語意，Wikipedia
 revision 與獨立 judge 負責驗證：
 
@@ -97,9 +274,14 @@ revision 與獨立 judge 負責驗證：
 uv run tkg-generate-multihop \
   --seed-file examples/multihop_seeds.example.json \
   --judge-model "INDEPENDENT_JUDGE_MODEL" \
+  --judge-workers 4 \
   --output multihop_question_packets.jsonl \
   --cases-output generated_multihop_cases.json
 ```
+
+Judge 預設最多四個並行 request，結果依 model、prompt contract、問題與 verified chain 的
+內容雜湊保存在 `<cache-path>.judge.db`；重跑相同題目不會再次付費。可用
+`--judge-workers` 與 `--judge-cache-path` 調整，但輸出仍維持 seed 原始順序。
 
 只跑 Wikipedia deterministic gates、不花 LLM judge 費用：
 
@@ -110,9 +292,9 @@ uv run tkg-generate-multihop \
   --output validation_packets.jsonl
 ```
 
-多跳 deterministic gates 會拒絕：少於 2 hops、cutoff 後沒有新 hop、revision 原文不符、
-缺少 source→target hyperlink、鏈不連續、鏈自己繞圈、問題洩漏中間 entity/答案。runner
-建完 arena 後還會拒絕不是 anchor→pivot 最短路徑的鏈。
+多跳 deterministic gates 會拒絕：少於 2 hops、相鄰 hop 沒有使用更晚時間、revision
+原文不符、缺少 source→target hyperlink、舊 revision 已提前出現下一 target、鏈不連續、
+鏈自己繞圈、問題洩漏中間 entity/答案。
 
 ### 單頁變更出題（保留）
 
@@ -153,16 +335,16 @@ Wikipedia revision 只能證明事實有變，不能證明某個模型不知道�
 
 - 問與正式任務相同的 `temporal_question` 與 target date。
 - 不給 Wikipedia、tools、arena 或先前對話。
-- 每次 probe 都是新對話，且不會把 PK response 塞回後續 navigation context。
-- 獨立 judge 標記 `stick_new` / `stick_old` / `hedge` / `unsupported` /
+- 每次 probe 都是新對話，使用不同的簡短 elicitation wording 與 sampling temperature，且不會把 PK response 塞回後續 navigation context。
+- accepted alias 先由 deterministic matcher 標記；只有模糊回答才交給獨立 judge，labels 為 `stick_new` / `stick_old` / `hedge` / `unsupported` /
   `unjudgeable`。
-- 預設做 3 次，`stick_new` 比例必須為 0，且不得有 `unjudgeable`，才能進入建圖與導航。
+- 預設做 5 次，temperatures 為 `0,0.2,0.5,0.7,1.0`；`stick_new` 比例必須為 0，且不得有 `unjudgeable`，才能進入建圖與導航。這是 prior-answer elicitation gate，不把三次 temperature-0 重複誤稱為未知性的證明。
 
 這是 per-model admission：同一題可能對模型 A 是未知、對模型 B 已知，不會把 case
 本身宣稱為所有模型都不知道。Cutoff-relative case 另外綁定 exact model ID；不同 cutoff
 的模型不能共用同一題而偷偷改變 anchor 的意思。
 
-## 建立最短路徑 Arena
+## Raw Arena 與 Semantic Route
 
 以 `(pivot page, target revision)` 為距離 0，沿 verified historical backlinks 做 reverse
 BFS；同 page 的不同 revision 之間加入 temporal edges：
@@ -172,7 +354,8 @@ uv run tkg-snapshot \
   --case-ids example_ceo \
   --snapshot-dates 2024-01-01,2025-01-01 \
   --max-depth 3 \
-  --branch-cap 25
+  --branch-cap 25 \
+  --max-nodes 500
 ```
 
 Wikipedia 原圖可以有環；正式 reasoning chain 本身不能有環。候選 nodes 蒐集完後，程式會在 bounded induced graph 上重新計算
@@ -182,22 +365,48 @@ pivot 永遠是 0，也不會因環再次出現在更深層。同一 page 的不
 歷史 backlinks 的候選來自 MediaWiki 目前的 backlink index，再逐一用指定日期 revision
 驗證。因此已回傳的 edge 是真的，但早已刪除且目前 backlink index 找不到的歷史 edge
 可能漏掉；「最短」是對本次 manifest 保存的 bounded arena 而言，不宣稱全 Wikipedia。
+`branch_cap` 限制每個節點的 backlink 候選，`max_nodes`／`--arena-node-cap` 限制整張
+reference arena；必要 reasoning route 會先放入，不會被候選排序擠掉。artifact 會保存
+`arena_truncated` 與 `discovery_mode`。offline run 只對已凍結在本機 cache 的 arena 精確，
+不等同 live MediaWiki coverage。
+
+Wikipedia 後期 revision 常保留舊事件的 hyperlink，因此 raw graph 可能出現語意捷徑。
+新版不再用這種捷徑否決題目，而是同時保存。當模型可任選日期時，raw arena 只是在
+generator 已知日期上建立的 reference graph，不宣稱涵蓋日期區間內的所有 revision：
+
+- `raw_shortest_navigation_steps`：page/revision hyperlink arena 的最短距離。
+- `reference_route_match` / `reference_route_coverage`：模型是否碰巧走過 generator 保存的一條 proof route，只作診斷。
+- `semantic_route_complete` 與 `semantic_waypoints_completed`：舊欄位保留相容性，語意等同上面的 reference-route 診斷，不是成功 gate。
+
+任何 Wikipedia hyperlink 路徑都可合法作答，不要求 generator 的路徑唯一。答案正確、target-date
+證據是否可見、時間探索、hyperlink 導航與 reference route 分開計分，避免把「猜對答案」寫成「完成時間探索」。
+空白 final answer 會在呼叫 LLM judge 前直接標成 `no_answer`；任何 positive judge label 的
+`answer_extracted` 也必須實際出現在被測模型輸出中。derived scorer 會覆核舊 artifact，並以
+`blank_answer_judge_overrides` 揭露歷史 judge 假陽性，不改寫 raw JSONL。
 
 ## 模型可用 Tools
 
-- `switch_snapshot(as_of, brief_reason)`：切換目前 page 的時間，可重複呼叫。
+- `switch_snapshot(as_of, brief_reason)`：切換目前 page 的時間，可重複呼叫；`as_of` 可由
+  模型在 cutoff–target 閉區間內任選 `YYYY-MM-DD`。
+- `list_revisions(from, to, limit)`：只回傳目前 page 的 revision 日期 JSON array；不回傳 diff、內容、edit comment、使用者或重要日期提示。
 - `view_current_page()`：閱讀目前 page revision。
 - `list_links()`：列出目前 revision 真正存在的 outgoing hyperlinks。
 - `follow_link(target)`：沿目前 revision 的 hyperlink 移動，時間保持不變。
 - `search_within_page(query)`：搜尋目前 revision 的可見正文。
 - `submit_answer(answer)`：提交最終答案並結束。
 
-模型第一個有效動作必須先選一個 snapshot，但之後可以不限次數切換。多跳題會告訴模型
-其 registered cutoff snapshot 與 target snapshot，但不告訴 pivot title。切換時間時保留
-page title，並重新載入該日期的 revision 與 links。題目的 `wikipedia_as_of` 會明確告訴
-模型那個日期是最終答案的 target；before、target 與其他 allowed dates 都仍可自由切換。
-模型只可沿 arena 內仍真實存在的 hyperlinks 移動，外部連結會保留在頁面文字中但不能作為
-本次 graph transition。
+起始 page 已在 registered cutoff revision 載入並直接顯示，不耗用 tool step，也不強迫第一個
+動作切時間；之後可以不限次數切換。預設只告訴模型
+registered cutoff 與 target 形成的日期範圍，不提供 generator 用來驗證題目的中繼日期。
+模型必須根據每次頁面輸出與 hyperlink 自己決定下一個日期；每次 `as_of`、`brief_reason`、
+解析到的 revision timestamp 都寫進 trajectory。切換時間時保留 page title，並即時載入該
+日期最後一個 revision 及其 links。兩個日期若解析到同一 revision，graph/viewer 會合併成
+同一 node。模型可沿該 revision 真正存在的任一 article hyperlink 移動，不再受 hidden
+reference arena 的 title 白名單限制。
+
+評分時，generator 保存的中繼日期與 revisions 仍是 hidden reference evidence，只用來計算
+reference-route coverage。模型可以走其他合法 page/revision 路徑；成功與否由答案以及實際看見
+的 target-date evidence 判定，不要求匹配 generator route。
 
 ## 執行
 
@@ -206,19 +415,21 @@ uv run tkg-run \
   --models "TESTED_MODEL" \
   --judge-model "INDEPENDENT_JUDGE_MODEL" \
   --case-ids example_ceo \
-  --snapshot-dates 2024-01-01,2025-01-01 \
   --start-distance 3 \
   --backlink-branch-cap 25 \
-  --pk-repeats 3 \
+  --pk-repeats 5 \
   --pk-max-known-rate 0 \
   --repeats 3 \
-  --max-steps 16 \
-  --offline
+  --max-steps 16
 ```
 
-若 case 是新版 generator 產生的，`--snapshot-dates` 可省略，runner 會使用保存的所有
-required hop dates。多跳 case 固定使用 seed 的 `start_title`；`--start-distance` 只作為
-arena 至少要建多深的下限。
+`--snapshot-dates` 預設省略，此時模型可在 cutoff–target 間任選日期。只有重播舊實驗或
+debug 固定時間清單時才顯式傳入它；這會恢復 enum allowlist 與 bounded arena 限制。
+多跳 case 固定使用 seed 的 `start_title`；`--start-distance` 只作為 reference arena 至少
+要建多深的下限。
+
+自由選時通常不能搭配 `--offline`，因為模型可能挑到 cache 尚未出現的日期；offline
+replay 應使用原 trajectory 已選過的 cache，或顯式傳 `--snapshot-dates` 固定清單。
 
 輸出：
 
@@ -226,24 +437,35 @@ arena 至少要建多深的下限。
 - `temporal_scores.csv`
 
 JSONL 會保存每次 tool call 的 page title、revision、來源/目的日期、tool output、完整
-visited versions、最終答案與 judge 結果。另保存：
+visited versions、最終答案與 judge 結果；`temporal_summary` 也保存實際送入模型的兩則
+初始 messages 與 tool JSON schema，方便確認沒有洩漏 hidden dates。另保存：
 
 - `pk_probe`：每次 fresh-context 問題、原始回答與 judge label。
-- `pk_gate`：題目 × 模型的新/舊/其他回答率與 admission 結果。
+- `pk_gate`：題目 × 模型的新/舊/其他回答率、deterministic/LLM judge 次數與 admission 結果。
 - `navigation_arena`：本次 bounded graph 的 nodes、edges、距離與 graph hash id。
+- `snapshot_mode` / `snapshot_range`：模型任選日期或 legacy 固定清單，以及公開日期範圍。
+- `reference_snapshot_dates`：只供事後稽核的 hidden oracle dates；不會送進模型 prompt。
 - `distance_to_pivot`：每次 navigation 後的最短剩餘距離。
-- `shortest_navigation_steps`：包含第一次選時間的理論最少步數。
+- `shortest_navigation_steps` / `raw_shortest_navigation_steps`：raw arena 距離。
+- `semantic_waypoints_completed`、`semantic_route_complete`、
+  `reference_route_match`、`reference_route_coverage`：reference proof route 診斷。
+- `revision_discovery_*`、`temporal_switch_*`、`hyperlink_follow_*`、
+  `target_snapshot_evidence_seen`、`answer_submitted`：分開的能力指標。
+- `failure_mode`：區分 revision discovery、時間探索、link navigation、找不到 target、看見證據後答錯與未作答。
+- `judge_mode`：明示本次是 `deterministic_alias` 或真正呼叫 `llm_fallback`。
 - `actual_steps_to_first_pivot` 與 `detour_steps`。
 - `revisit_count`、`cycle_detected`、`shortest_arrival`。
 
 `view_current_page`、`list_links`、`search_within_page` 不算移動；成功的
-`switch_snapshot` 與 `follow_link` 各算一步。API error 不會寫 complete checkpoint。
+`switch_snapshot` 與 `follow_link` 各算一步；cutoff initial state 與 `list_revisions` 不算移動。API error 不會寫 complete checkpoint。
 
 ## Answer Judge
 
-Judge 和被測模型必須不同，labels 為：
+accepted alias 的明確回答先走 deterministic gate；模糊回答才使用與被測模型不同的 LLM
+judge。labels 為：
 
 - `correct_after`
+- `correct_without_visible_support`（答案字面正確，但 trajectory 沒顯示該答案的 target-date evidence）
 - `old_snapshot_answer`
 - `supported_other_time`
 - `unsupported`
@@ -267,7 +489,7 @@ uv run tkg-visualize \
   --results temporal_results.jsonl
 ```
 
-Viewer 初始只顯示 pivot 的 target revision。播放 trajectory 時：
+Temporal viewer 初始只顯示模型實際收到的 start page cutoff revision。播放 trajectory 時：
 
 - 模型切到另一時間：產生同 page 另一 revision node 與紫色 temporal edge。
 - 模型進入某 revision：只展開該 revision 的一層 outgoing hyperlink nodes。

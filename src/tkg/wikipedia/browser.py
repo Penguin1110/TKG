@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import date
 
 from tkg.api.openrouter import OpenRouterError, call_model_with_tools
 from tkg.wikipedia.backend import WikipediaError, normalize_title
@@ -31,8 +32,9 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "list_links",
-        "description": "List hyperlinks actually present in the current page. Use offset to page "
-                       "through a long list, or query to filter by anchor/target text.",
+        "description": "List hyperlinks actually present in the current page. The optional query "
+                       "is a literal substring filter over anchor/target text, not semantic "
+                       "search; use search_within_page to find concepts in article text.",
         "parameters": {"type": "object", "properties": {
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "query": {"type": "string", "default": ""},
@@ -88,24 +90,65 @@ def _snapshot_tool(allowed_as_of: list[str | None]) -> list[dict]:
     }}]
 
 
-def _temporal_tools(allowed_as_of: list[str | None]) -> list[dict]:
+def _temporal_tools(
+    allowed_as_of: list[str | None],
+    snapshot_date_range: tuple[str, str] | None = None,
+) -> list[dict]:
     tokens = [_snapshot_token(value) for value in allowed_as_of]
+    if snapshot_date_range is None:
+        as_of_schema = {"type": "string", "enum": tokens}
+        time_description = "another allowed time"
+    else:
+        start, end = snapshot_date_range
+        as_of_schema = {
+            "type": "string",
+            "format": "date",
+            "description": (
+                f"Any calendar date from {start} through {end}, inclusive, in "
+                "strict YYYY-MM-DD form."
+            ),
+        }
+        time_description = "any date inside the experiment's allowed date range"
     switch_tool = {"type": "function", "function": {
         "name": "switch_snapshot",
         "description": (
-            "Load the same current Wikipedia page at another allowed time. You may call this "
-            "repeatedly. The page revision and its outgoing hyperlinks both change with time."
+            f"Load the same current Wikipedia page at {time_description}. You may call this "
+            "repeatedly and choose each date yourself. The page revision and its outgoing "
+            "hyperlinks both change with time."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "as_of": {"type": "string", "enum": tokens},
+                "as_of": as_of_schema,
                 "brief_reason": {
                     "type": "string",
                     "description": "One short observable reason for changing time.",
                 },
             },
             "required": ["as_of", "brief_reason"],
+        },
+    }}
+    if snapshot_date_range is None:
+        dated = sorted(value for value in allowed_as_of if value is not None)
+        revision_start = dated[0] if dated else "1900-01-01"
+        revision_end = dated[-1] if dated else date.today().isoformat()
+    else:
+        revision_start, revision_end = snapshot_date_range
+    revision_tool = {"type": "function", "function": {
+        "name": "list_revisions",
+        "description": (
+            "List dates on which the current page had revisions inside a requested interval. "
+            "The result contains dates only: no edit text, comments, users, diffs, or hints "
+            "about which date matters. Use the dates to choose a later switch_snapshot call."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string", "format": "date", "minimum": revision_start},
+                "to": {"type": "string", "format": "date", "maximum": revision_end},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+            },
+            "required": ["from", "to", "limit"],
         },
     }}
     submit_tool = {"type": "function", "function": {
@@ -117,7 +160,7 @@ def _temporal_tools(allowed_as_of: list[str | None]) -> list[dict]:
             "required": ["answer"],
         },
     }}
-    return [switch_tool, *TOOLS[:-1], submit_tool]
+    return [switch_tool, revision_tool, *TOOLS[:-1], submit_tool]
 
 
 def run_snapshot_selection(
@@ -486,10 +529,12 @@ def run_temporal_browsing(
     *,
     target_title: str,
     target_as_of: str | None,
+    snapshot_date_range: tuple[str, str] | None = None,
     allowed_version_keys: set[str] | None = None,
     allowed_titles_by_snapshot: dict[str, list[str]] | None = None,
     reveal_target_title: bool = True,
     cutoff_reference: str | None = None,
+    semantic_route_contract: dict | None = None,
     temperature: float = 0.7,
     call_model_fn=call_model_with_tools,
     verbose: bool = True,
@@ -499,21 +544,78 @@ def run_temporal_browsing(
     for value in allowed_as_of:
         if value not in unique_dates:
             unique_dates.append(value)
-    if len(unique_dates) < 2:
+    if snapshot_date_range is None and len(unique_dates) < 2:
         raise ValueError("temporal browsing requires at least two allowed snapshots")
     token_to_value = {_snapshot_token(value): value for value in unique_dates}
     tokens = list(token_to_value)
     target_token = _snapshot_token(target_as_of)
-    if target_token not in token_to_value:
+    range_start: date | None = None
+    range_end: date | None = None
+    if snapshot_date_range is not None:
+        start_token, end_token = snapshot_date_range
+        try:
+            range_start = date.fromisoformat(start_token)
+            range_end = date.fromisoformat(end_token)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("snapshot_date_range must contain strict YYYY-MM-DD dates") from exc
+        if range_start.isoformat() != start_token or range_end.isoformat() != end_token:
+            raise ValueError("snapshot_date_range must contain strict YYYY-MM-DD dates")
+        if range_start > range_end:
+            raise ValueError("snapshot_date_range start must not be after its end")
+        if target_as_of is None:
+            raise ValueError("an agent-selected date range requires a dated target snapshot")
+        try:
+            parsed_target = date.fromisoformat(target_as_of)
+        except ValueError as exc:
+            raise ValueError("target_as_of must be a strict YYYY-MM-DD date") from exc
+        if not range_start <= parsed_target <= range_end:
+            raise ValueError("target snapshot is outside snapshot_date_range")
+    elif target_token not in token_to_value:
         raise ValueError(f"target snapshot {target_token!r} is not in allowed snapshots")
-    arena_versions = set(allowed_version_keys or [])
-    arena_titles = {
-        token: {title.casefold() for title in titles}
-        for token, titles in (allowed_titles_by_snapshot or {}).items()
-    }
+    # The finite arena is a legacy/frozen-date contract.  Range mode fetches
+    # revisions lazily and lets the rendered page's real hyperlinks define the
+    # graph, so hidden oracle waypoints cannot become a traversal whitelist.
+    arena_versions = (
+        set(allowed_version_keys or []) if snapshot_date_range is None else set()
+    )
+    arena_titles = (
+        {
+            token: {title.casefold() for title in titles}
+            for token, titles in (allowed_titles_by_snapshot or {}).items()
+        }
+        if snapshot_date_range is None else {}
+    )
 
     def version_key(page) -> str:
         return f"{int(page.revision_id)}:{page.title.casefold()}"
+
+    initial_as_of = cutoff_reference
+    if initial_as_of is None:
+        initial_as_of = (
+            snapshot_date_range[0] if snapshot_date_range is not None
+            else unique_dates[0]
+        )
+    initial_token = _snapshot_token(initial_as_of)
+    if snapshot_date_range is None:
+        if initial_token not in token_to_value:
+            raise ValueError(
+                f"initial cutoff snapshot {initial_token!r} is not in allowed snapshots"
+            )
+    else:
+        try:
+            parsed_initial = date.fromisoformat(str(initial_as_of))
+        except ValueError as exc:
+            raise ValueError("initial cutoff must be a strict YYYY-MM-DD date") from exc
+        if not range_start <= parsed_initial <= range_end:  # type: ignore[operator]
+            raise ValueError("initial cutoff is outside snapshot_date_range")
+    current = backend.fetch_page(normalize_title(start_title), as_of=initial_as_of)
+    # The reference arena is built backwards from the target and can omit the
+    # same start title at the cutoff revision.  That must not invalidate the
+    # public initial state; the arena is diagnostic, not an oracle whitelist
+    # for the already-loaded page.
+    current_as_of: str | None = initial_as_of
+    current_token: str = initial_token
+    current_title = current.title
     target_instruction = (
         f'Target pivot page title: "{target_title}"\n'
         "Navigate through real page hyperlinks to the target pivot, then answer the "
@@ -527,33 +629,69 @@ def run_temporal_browsing(
         f"\nRegistered knowledge-cutoff snapshot for this tested model: {cutoff_reference}"
         if cutoff_reference else ""
     )
+    semantic_instruction = ""
+    if semantic_route_contract:
+        semantic_instruction = (
+            "\nThe question may require multiple pages and dates. Any path through rendered "
+            "Wikipedia revisions is valid if it exposes enough evidence for the answer; the "
+            "generator's reference path is not required."
+        )
+    if snapshot_date_range is None:
+        snapshot_instruction = f"Allowed snapshots: {json.dumps(tokens)}"
+        arena_instruction = (
+            "Only page-version nodes inside the experiment's bounded navigation arena are "
+            "traversable."
+        )
+        comparison_instruction = "Other listed snapshots are available for comparison."
+    else:
+        start_token, end_token = snapshot_date_range
+        snapshot_instruction = (
+            f"Allowed date range: {start_token} through {end_token}, inclusive. "
+            "Choose any YYYY-MM-DD date in this range whenever you call switch_snapshot."
+        )
+        arena_instruction = (
+            "At each selected date, only hyperlinks actually exposed by that rendered page "
+            "revision are traversable."
+        )
+        comparison_instruction = (
+            "Intermediate dates are not assigned: select them from the range based on the "
+            "pages and links you observe."
+        )
     messages = [
         {"role": "system", "content": (
             "Answer the user's temporal question by exploring Wikipedia page revisions. "
             "You may switch time repeatedly and follow only hyperlinks exposed by the current "
             "revision. Use submit_answer when finished. Give brief tool reasons, not private "
-            "chain-of-thought. Only page-version nodes inside the experiment's bounded "
-            "navigation arena are traversable."
+            f"chain-of-thought. {arena_instruction}"
         )},
         {"role": "user", "content": (
             f"Question: {question}\n"
             f'Starting page title: "{start_title}"\n'
             f"{target_instruction}\n"
-            f"Allowed snapshots: {json.dumps(tokens)}\n"
+            f"{snapshot_instruction}\n"
             f"Target snapshot to answer: {target_token}{cutoff_instruction}\n"
-            "Other snapshots are available for comparison.\n"
-            "Your first action must be switch_snapshot. You may switch_snapshot again at any "
-            "later step."
+            f"{semantic_instruction}\n"
+            f"{comparison_instruction}\n"
+            f"The starting page is already loaded at the cutoff snapshot "
+            f"{initial_token}; do not spend an action selecting it. You may inspect this page, "
+            "list its revision dates, follow a link, or switch_snapshot at any later step.\n\n"
+            f"Initial page at cutoff:\n{_render_page(current)}"
         )},
     ]
-    tools = _temporal_tools(unique_dates)
-    current = None
-    current_as_of: str | None = None
-    current_token: str | None = None
-    current_title = normalize_title(start_title)
-    visited_titles: set[str] = set()
-    visited_versions: list[dict] = []
-    evidence_pages: list[dict] = []
+    tools = _temporal_tools(unique_dates, snapshot_date_range)
+    initial_messages = [dict(message) for message in messages]
+    visited_titles: set[str] = {current.title.casefold()}
+    visited_versions: list[dict] = [{
+        "title": current.title,
+        "revision_id": current.revision_id,
+        "timestamp": current.timestamp,
+        "as_of": current.as_of,
+        "snapshot_token": initial_token,
+        "requested_snapshot_tokens": [initial_token],
+    }]
+    evidence_pages: list[dict] = [
+        _evidence_page(current, _visible_page_content(current))
+    ]
     trajectory: list[dict] = []
     final_answer = ""
     stop_reason = "max_steps"
@@ -563,12 +701,24 @@ def run_temporal_browsing(
             print(message)
 
     def remember_page(page, token: str) -> None:
+        for existing in visited_versions:
+            if (
+                existing["title"].casefold() == page.title.casefold()
+                and existing["revision_id"] == page.revision_id
+            ):
+                requested = existing.setdefault(
+                    "requested_snapshot_tokens", [existing["snapshot_token"]]
+                )
+                if token not in requested:
+                    requested.append(token)
+                return
         record = {
             "title": page.title,
             "revision_id": page.revision_id,
             "timestamp": page.timestamp,
             "as_of": page.as_of,
             "snapshot_token": token,
+            "requested_snapshot_tokens": [token],
         }
         if record not in visited_versions:
             visited_versions.append(record)
@@ -625,12 +775,30 @@ def run_temporal_browsing(
                 if name == "switch_snapshot":
                     token = str(args.get("as_of", ""))
                     reason = " ".join(str(args.get("brief_reason", "")).split())[:300]
-                    if token not in token_to_value:
+                    next_as_of: str | None = None
+                    if snapshot_date_range is None and token not in token_to_value:
                         result = f"Error: snapshot {token!r} is not allowed."
+                    elif snapshot_date_range is not None:
+                        try:
+                            selected_date = date.fromisoformat(token)
+                        except ValueError:
+                            selected_date = None
+                        if selected_date is None or selected_date.isoformat() != token:
+                            result = "Error: snapshot must use strict YYYY-MM-DD form."
+                        elif not range_start <= selected_date <= range_end:  # type: ignore[operator]
+                            result = (
+                                f"Error: snapshot {token!r} is outside the allowed range "
+                                f"{snapshot_date_range[0]} through {snapshot_date_range[1]}."
+                            )
+                        elif not reason:
+                            result = "Error: brief_reason must not be empty."
+                        else:
+                            next_as_of = token
                     elif not reason:
                         result = "Error: brief_reason must not be empty."
                     else:
                         next_as_of = token_to_value[token]
+                    if next_as_of is not None:
                         switched = backend.fetch_page(current_title, as_of=next_as_of)
                         if arena_versions and version_key(switched) not in arena_versions:
                             result = (
@@ -648,6 +816,50 @@ def run_temporal_browsing(
                             evidence_pages.append(_evidence_page(
                                 current, _visible_page_content(current)
                             ))
+                elif name == "list_revisions":
+                    start_arg = str(args.get("from", ""))
+                    end_arg = str(args.get("to", ""))
+                    start_date: date | None
+                    end_date: date | None
+                    try:
+                        start_date = date.fromisoformat(start_arg)
+                        end_date = date.fromisoformat(end_arg)
+                        limit = int(args.get("limit", 10))
+                    except (TypeError, ValueError):
+                        start_date = end_date = None
+                        limit = 0
+                    allowed_start = (
+                        range_start if snapshot_date_range is not None
+                        else date.fromisoformat(min(
+                            value for value in unique_dates if value is not None
+                        ))
+                    )
+                    allowed_end = (
+                        range_end if snapshot_date_range is not None
+                        else date.fromisoformat(max(
+                            value for value in unique_dates if value is not None
+                        ))
+                    )
+                    if (
+                        start_date is None or end_date is None
+                        or start_date.isoformat() != start_arg
+                        or end_date.isoformat() != end_arg
+                    ):
+                        result = "Error: from and to must use strict YYYY-MM-DD form."
+                    elif not allowed_start <= start_date <= end_date <= allowed_end:  # type: ignore[operator]
+                        result = (
+                            "Error: revision interval must stay inside the experiment's "
+                            f"allowed range {allowed_start} through {allowed_end}."
+                        )
+                    elif not 1 <= limit <= 20:
+                        result = "Error: limit must be an integer from 1 through 20."
+                    elif not hasattr(backend, "list_revision_dates"):
+                        result = "Error: this backend does not support revision discovery."
+                    else:
+                        dates = backend.list_revision_dates(
+                            current.title, start_arg, end_arg, limit
+                        )
+                        result = json.dumps(dates, ensure_ascii=False)
                 elif current is None:
                     result = "Error: call switch_snapshot before using page tools."
                 elif name == "view_current_page":
@@ -709,7 +921,7 @@ def run_temporal_browsing(
                         should_stop = True
                 else:
                     result = f"Error: unknown tool {name}."
-            except WikipediaError as exc:
+            except (WikipediaError, ValueError) as exc:
                 result = f"Error: {exc}"
 
             record = {
@@ -724,6 +936,10 @@ def run_temporal_browsing(
                 "snapshot_token": current_token,
                 "from_revision_id": origin_revision,
                 "revision_id": current.revision_id if current else None,
+                "requested_snapshot_as_of": (
+                    str(args.get("as_of")) if name == "switch_snapshot" else None
+                ),
+                "resolved_revision_timestamp": current.timestamp if current else None,
             }
             trajectory.append(record)
             messages.append({
@@ -756,4 +972,12 @@ def run_temporal_browsing(
         "visited_versions": visited_versions,
         "evidence_pages": unique_evidence,
         "target_title_revealed": reveal_target_title,
+        "snapshot_mode": (
+            "agent_selected_range" if snapshot_date_range is not None
+            else "fixed_allowlist"
+        ),
+        "snapshot_date_range": snapshot_date_range,
+        "initial_state": visited_versions[0],
+        "initial_messages": initial_messages,
+        "tool_contract": tools,
     }

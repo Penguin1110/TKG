@@ -213,6 +213,12 @@ def _write_temporal_results(path: str):
             "navigation_id": "nav-1",
             "start_title": "Source", "start_distance": 1,
             "reasoning_hop_count": 3, "reasoning_chain": [{"index": 0}],
+            "temporal_waypoints": [
+                {"index": 0, "title": "Source", "revision_id": 303,
+                 "as_of": "2025-01-01", "incoming_edge": "start"},
+                {"index": 1, "title": "Pivot", "revision_id": 202,
+                 "as_of": "2025-01-01", "incoming_edge": "hyperlink"},
+            ],
             "knowledge_cutoff": {"cutoff_date": "2024-01-01"},
             "target_title_revealed": False,
             "target_title": "Pivot", "target_revision_id": 202, "final_title": "Pivot",
@@ -221,6 +227,14 @@ def _write_temporal_results(path: str):
             "pivot_hit": True, "shortest_navigation_steps": 2,
             "actual_steps_to_first_pivot": 2, "detour_steps": 0,
             "shortest_arrival": True, "revisit_count": 1, "cycle_detected": True,
+            "raw_shortest_navigation_steps": 2,
+            "semantic_shortest_navigation_steps": 2,
+            "semantic_actual_steps_to_complete": 2,
+            "semantic_route_complete": True,
+            "semantic_waypoints_completed": 2, "semantic_waypoint_count": 2,
+            "semantic_completion_rate": 1.0,
+            "required_temporal_switches": 0,
+            "actual_required_temporal_switches": 0,
             "stop_reason": "submit_answer", "visited_versions": [
                 {"title": "Source", "revision_id": 303, "timestamp": "2025-01-01T00:00:00Z",
                  "as_of": "2025-01-01", "snapshot_token": "2025-01-01"},
@@ -245,7 +259,7 @@ def test_exporter_builds_page_graph_and_replayable_trajectory():
         _write_cache(cache)
         _write_results(results)
         data = build_visualization_data(cache, results)
-    assert data["schema_version"] == "tkg-visualization-v3"
+    assert data["schema_version"] == "tkg-visualization-v4"
     assert len(data["graph"]["nodes"]) == 4
     assert len(data["graph"]["edges"]) == 3
     nodes = {node["title"]: node for node in data["graph"]["nodes"]}
@@ -298,6 +312,7 @@ def test_temporal_trajectory_reveals_only_switched_page_versions():
     nodes = {node["revision_id"]: node for node in data["graph"]["nodes"]
              if node["revision_id"] is not None}
     assert trajectory["pivot_node_id"] == nodes[202]["id"]
+    assert trajectory["initial_reveal_node_ids"] == [nodes[303]["id"]]
     assert trajectory["events"][0]["action"] == "switch_snapshot"
     assert nodes[303]["id"] in trajectory["events"][0]["reveal_node_ids"]
     assert nodes[202]["id"] in trajectory["events"][1]["reveal_node_ids"]
@@ -313,6 +328,10 @@ def test_temporal_trajectory_reveals_only_switched_page_versions():
     assert trajectory["knowledge_cutoff"]["cutoff_date"] == "2024-01-01"
     assert trajectory["target_title_revealed"] is False
     assert trajectory["shortest_navigation_steps"] == 2
+    assert trajectory["raw_shortest_navigation_steps"] == 2
+    assert trajectory["semantic_route_complete"] is True
+    assert trajectory["semantic_waypoints_completed"] == 2
+    assert len(trajectory["semantic_waypoint_node_ids"]) == 2
     assert trajectory["actual_steps_to_first_pivot"] == 2
     assert trajectory["detour_steps"] == 0
     assert trajectory["cycle_detected"] is True

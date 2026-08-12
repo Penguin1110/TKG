@@ -63,7 +63,7 @@ button, input, select { font: inherit; }
 
 .sidebar footer { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 24px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
 .dot { display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 50%; }
-.dot.cached { background: var(--blue-bright); }.dot.stub { background:#788790; }.dot.pivot { background:var(--green); }.dot.temporal { background:#b083d1; }.dot.path { background:var(--gold); }.dot.current { background:var(--coral); }
+.dot.cached { background: var(--blue-bright); }.dot.stub { background:#788790; }.dot.pivot { background:var(--green); }.dot.temporal { background:#b083d1; }.dot.waypoint { background:#f2cf5b; }.dot.path { background:var(--gold); }.dot.current { background:var(--coral); }
 
 .stage { position: relative; min-width: 0; background: var(--graph); overflow: hidden; }
 .stage::before { content:""; position:absolute; inset:0; opacity:.24; pointer-events:none; background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px); background-size:32px 32px; }

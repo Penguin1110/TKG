@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Callable
 
 from tkg.api.openrouter import call_model
@@ -15,8 +16,57 @@ ALLOWED_ANSWER_LABELS = {
 }
 ALLOWED_TEMPORAL_LABELS = {
     "correct_after", "old_snapshot_answer", "supported_other_time",
-    "unsupported", "no_answer", "unjudgeable",
+    "correct_without_visible_support", "unsupported", "no_answer", "unjudgeable",
 }
+
+
+def _fold_text(value: str) -> str:
+    return " ".join(
+        unicodedata.normalize("NFKC", value).casefold().split()
+    )
+
+
+def _matched_aliases(response: str, aliases: list[str]) -> list[str]:
+    """Return aliases explicitly present as complete normalized spans."""
+    folded = _fold_text(response)
+    matches = []
+    for alias in aliases:
+        candidate = _fold_text(alias)
+        if not candidate:
+            continue
+        if folded == candidate or re.search(
+            rf"(?<!\w){re.escape(candidate)}(?!\w)", folded
+        ):
+            matches.append(alias)
+    return matches
+
+
+def _deterministic_result(decision: str, response: str, alias: str, gate: str) -> JudgeResult:
+    return JudgeResult(
+        decision=decision, confidence=1.0,
+        reason=f"Deterministic accepted-alias match ({gate}).",
+        evidence=alias, answer_extracted=alias,
+        raw={"deterministic_gate": gate, "tested_response": response},
+    )
+
+
+def _require_extracted_answer_in_response(
+    result: JudgeResult, response: str, positive_labels: set[str],
+) -> JudgeResult:
+    """Fail closed when a judge invents an answer absent from model output."""
+    if result.decision not in positive_labels:
+        return result
+    extracted = _fold_text(result.answer_extracted)
+    folded_response = _fold_text(response)
+    if extracted and extracted in folded_response:
+        return result
+    result.raw = {
+        **result.raw,
+        "contract_violation": "answer_extracted_not_in_tested_response",
+        "original_decision": result.decision,
+    }
+    result.decision = "unjudgeable"
+    return result
 
 
 def _extract_json(text: str) -> dict:
@@ -44,11 +94,33 @@ def _extract_json(text: str) -> dict:
     raise ValueError("judge 沒有回傳可解析的 JSON object")
 
 
-def evidence_text(pages: list[dict], max_chars: int = 28_000) -> str:
+def evidence_text(
+    pages: list[dict],
+    max_chars: int = 28_000,
+    *,
+    prioritize_as_of: str | None = None,
+) -> str:
+    ordered_pages = list(pages)
+    if prioritize_as_of is not None:
+        # Final-answer judging is about the requested target snapshot.  Put
+        # those revisions first so earlier long pages cannot consume the
+        # entire evidence budget before the answer-bearing revision appears.
+        ordered_pages = [
+            page for page in ordered_pages
+            if str(page.get("as_of")) == prioritize_as_of
+        ] + [
+            page for page in ordered_pages
+            if str(page.get("as_of")) != prioritize_as_of
+        ]
     chunks = []
     used = 0
-    for page in pages:
-        header = f"[PAGE {page['title']} | revision {page['revision_id']} | {page['timestamp']}]\n"
+    for page in ordered_pages:
+        as_of = page.get("as_of")
+        as_of_label = f" | as_of {as_of}" if as_of is not None else ""
+        header = (
+            f"[PAGE {page['title']} | revision {page['revision_id']} | "
+            f"{page['timestamp']}{as_of_label}]\n"
+        )
         remaining = max_chars - used - len(header)
         if remaining <= 0:
             break
@@ -182,6 +254,16 @@ decision must be answerable, not_answerable, ambiguous, or unjudgeable.
         old_answers: list[str],
         pages: list[dict],
     ) -> JudgeResult:
+        new_matches = _matched_aliases(response, new_answers)
+        old_matches = _matched_aliases(response, old_answers)
+        if new_matches and not old_matches:
+            return _deterministic_result(
+                "stick_new", response, new_matches[0], "exact_new_alias"
+            )
+        if old_matches and not new_matches:
+            return _deterministic_result(
+                "stick_old", response, old_matches[0], "exact_old_alias"
+            )
         prompt = f"""Task: classify the tested model's answer.
 
 Question: {question}
@@ -208,7 +290,9 @@ Return keys: decision, confidence, answer_extracted, evidence, reason.
         result = self._apply_confidence_gate(self._result(self._call(prompt)))
         if result.decision not in ALLOWED_ANSWER_LABELS:
             result.decision = "unjudgeable"
-        return result
+        return _require_extracted_answer_in_response(
+            result, response, {"stick_new", "stick_old"},
+        )
 
     def judge_temporal_answer(
         self,
@@ -220,6 +304,35 @@ Return keys: decision, confidence, answer_extracted, evidence, reason.
         *,
         target_snapshot_as_of: str | None = None,
     ) -> JudgeResult:
+        if not response.strip():
+            return JudgeResult(
+                decision="no_answer",
+                confidence=1.0,
+                reason="The tested model submitted no answer.",
+                evidence="",
+                answer_extracted="",
+                raw={"deterministic_gate": "blank_response"},
+            )
+        after_matches = _matched_aliases(response, after_answers)
+        before_matches = _matched_aliases(response, before_answers)
+        if after_matches and not before_matches:
+            alias = after_matches[0]
+            target_support = any(
+                (target_snapshot_as_of is None
+                 or page.get("as_of") == target_snapshot_as_of)
+                and bool(_matched_aliases(str(page.get("content", "")), [alias]))
+                for page in pages
+            )
+            return _deterministic_result(
+                "correct_after" if target_support else "correct_without_visible_support",
+                response, alias,
+                "exact_new_alias_with_target_support"
+                if target_support else "exact_new_alias_without_target_support",
+            )
+        if before_matches and not after_matches:
+            return _deterministic_result(
+                "old_snapshot_answer", response, before_matches[0], "exact_old_alias"
+            )
         target_label = target_snapshot_as_of or "CURRENT"
         prompt = f"""Task: evaluate the final answer from a model that could browse multiple
 Wikipedia snapshots.
@@ -231,7 +344,7 @@ Answer aliases supported by the later target revision: {json.dumps(after_answers
 Answer aliases supported by the earlier target revision: {json.dumps(before_answers, ensure_ascii=False)}
 
 Page revisions actually shown to the tested model:
-{evidence_text(pages)}
+{evidence_text(pages, prioritize_as_of=target_snapshot_as_of)}
 
 Labels:
 - correct_after: clearly answers with the later target answer.
@@ -248,7 +361,10 @@ confidence, answer_extracted, evidence, reason. Evidence must be a short excerpt
         result = self._apply_confidence_gate(self._result(self._call(prompt)))
         if result.decision not in ALLOWED_TEMPORAL_LABELS:
             result.decision = "unjudgeable"
-        return result
+        return _require_extracted_answer_in_response(
+            result, response,
+            {"correct_after", "old_snapshot_answer", "supported_other_time"},
+        )
 
 
 def transition_label(previous: str | None, current: str) -> str:

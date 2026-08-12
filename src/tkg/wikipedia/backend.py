@@ -13,7 +13,7 @@ import json
 import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import unquote, urlparse
@@ -170,6 +170,18 @@ class WikipediaPageBackend:
             "source_key TEXT NOT NULL, target_folded TEXT NOT NULL, target_title TEXT NOT NULL, "
             "PRIMARY KEY(source_key, target_folded, target_title))"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS revision_cache ("
+            "lang TEXT NOT NULL, revision_id INTEGER NOT NULL, title TEXT NOT NULL, "
+            "content TEXT NOT NULL, links_json TEXT NOT NULL, fetched_at TEXT NOT NULL, "
+            "PRIMARY KEY(lang, revision_id))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS revision_date_cache ("
+            "lang TEXT NOT NULL, title_folded TEXT NOT NULL, from_date TEXT NOT NULL, "
+            "to_date TEXT NOT NULL, dates_json TEXT NOT NULL, fetched_at TEXT NOT NULL, "
+            "PRIMARY KEY(lang,title_folded,from_date,to_date))"
+        )
         self._conn.commit()
 
     def close(self):
@@ -237,6 +249,40 @@ class WikipediaPageBackend:
         )
         self._conn.commit()
 
+    def _load_parsed_revision(
+        self, revision_id: int
+    ) -> tuple[str, str, list[PageLink]] | None:
+        """Load date-independent rendered content for one immutable revision."""
+        row = self._conn.execute(
+            "SELECT title,content,links_json FROM revision_cache "
+            "WHERE lang=? AND revision_id=?",
+            (self.lang, revision_id),
+        ).fetchone()
+        if not row:
+            return None
+        links = [PageLink(**value) for value in json.loads(row[2])]
+        return str(row[0]), str(row[1]), links
+
+    def _store_parsed_revision(
+        self, revision_id: int, title: str, content: str, links: list[PageLink]
+    ) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO revision_cache("
+            "lang,revision_id,title,content,links_json,fetched_at) VALUES(?,?,?,?,?,?)",
+            (
+                self.lang,
+                revision_id,
+                title,
+                content,
+                json.dumps(
+                    [{"target": link.target, "anchor": link.anchor} for link in links],
+                    ensure_ascii=False,
+                ),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+
     def _resolve_revision(self, title: str, as_of: str | None) -> tuple[str, int, int, str]:
         params = {
             "action": "query", "format": "json", "formatversion": "2", "redirects": "1",
@@ -279,11 +325,16 @@ class WikipediaPageBackend:
                 f"offline_only=True，但 snapshot 沒有 {title!r}（as_of={as_of!r}）"
             )
         resolved, page_id, revision_id, timestamp = self._resolve_revision(title, as_of)
-        parsed_title, html, allowed = self._parse_revision(revision_id)
-        parser = _VisiblePageParser(allowed)
-        parser.feed(html)
-        content, links = parser.result()
-        canonical = normalize_title(parsed_title or resolved)
+        parsed_revision = None if refresh else self._load_parsed_revision(revision_id)
+        if parsed_revision is None:
+            parsed_title, html, allowed = self._parse_revision(revision_id)
+            parser = _VisiblePageParser(allowed)
+            parser.feed(html)
+            content, links = parser.result()
+            canonical = normalize_title(parsed_title or resolved)
+            self._store_parsed_revision(revision_id, canonical, content, links)
+        else:
+            canonical, content, links = parsed_revision
         page = PageSnapshot(
             title=canonical, page_id=page_id, revision_id=revision_id, timestamp=timestamp,
             as_of=as_of, content=content, links=links,
@@ -291,6 +342,119 @@ class WikipediaPageBackend:
         )
         self._store(title, page)
         return page
+
+    @staticmethod
+    def _strict_date(value: str, field: str) -> str:
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field} must use strict YYYY-MM-DD form") from exc
+        if parsed.isoformat() != value:
+            raise ValueError(f"{field} must use strict YYYY-MM-DD form")
+        return value
+
+    @staticmethod
+    def _sample_revision_dates(values: list[str], limit: int) -> list[str]:
+        """Evenly retain dates across the interval instead of only early edits."""
+        unique = sorted(set(values))
+        if len(unique) <= limit:
+            return unique
+        if limit == 1:
+            return [unique[-1]]
+        indices = {
+            round(index * (len(unique) - 1) / (limit - 1))
+            for index in range(limit)
+        }
+        return [unique[index] for index in sorted(indices)]
+
+    def list_revision_dates(
+        self, title: str, from_date: str, to_date: str, limit: int = 10
+    ) -> list[str]:
+        """List sampled revision dates, deliberately omitting content and comments."""
+        start = self._strict_date(from_date, "from")
+        end = self._strict_date(to_date, "to")
+        if start > end:
+            raise ValueError("from must not be after to")
+        if isinstance(limit, bool) or not 1 <= int(limit) <= 20:
+            raise ValueError("limit must be an integer from 1 through 20")
+        limit = int(limit)
+        key = (self.lang, normalize_title(title).casefold(), start, end)
+        cached = self._conn.execute(
+            "SELECT dates_json FROM revision_date_cache WHERE "
+            "lang=? AND title_folded=? AND from_date=? AND to_date=?", key,
+        ).fetchone()
+        if cached:
+            return self._sample_revision_dates(list(json.loads(cached[0])), limit)
+        if self.offline_only:
+            raise WikipediaError(
+                f"offline_only=True，但沒有 {title!r} 在 {start}..{end} 的 revision 日期快取"
+            )
+
+        dates: list[str] = []
+        continuation: str | None = None
+        # A hard bound prevents an extremely active article from causing an
+        # unbounded API scan.  Sampling is deterministic and spans all fetched
+        # dates, so the result is still useful for choosing temporal probes.
+        while len(dates) < 5000:
+            params = {
+                "action": "query", "format": "json", "formatversion": "2",
+                "redirects": "1", "titles": normalize_title(title),
+                "prop": "revisions", "rvprop": "timestamp", "rvlimit": "500",
+                "rvdir": "newer", "rvstart": f"{start}T00:00:00Z",
+                "rvend": f"{end}T23:59:59Z",
+            }
+            if continuation:
+                params["rvcontinue"] = continuation
+            data = self._api_get(self.api_url, params)
+            pages = data.get("query", {}).get("pages", [])
+            if not pages or pages[0].get("missing"):
+                raise WikipediaError(f"Wikipedia 找不到頁面：{title}")
+            dates.extend(
+                str(item.get("timestamp", ""))[:10]
+                for item in pages[0].get("revisions", [])
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*", str(item.get("timestamp", "")))
+            )
+            continuation = data.get("continue", {}).get("rvcontinue")
+            if not continuation:
+                break
+        if continuation:
+            # Extremely active pages can exceed the 5,000-revision scan cap.
+            # In that case, discard the early-date-biased scan and probe fixed
+            # calendar quantiles, retaining only real revision dates returned
+            # by MediaWiki.  This keeps the tool bounded without presenting a
+            # misleading cluster from the beginning of the interval.
+            start_day = date.fromisoformat(start)
+            end_day = date.fromisoformat(end)
+            span = (end_day - start_day).days
+            probed_dates = []
+            probe_count = 20 if span else 1
+            for index in range(probe_count):
+                probe = start_day + timedelta(
+                    days=round(span * index / (probe_count - 1)) if span else 0
+                )
+                data = self._api_get(self.api_url, {
+                    "action": "query", "format": "json", "formatversion": "2",
+                    "redirects": "1", "titles": normalize_title(title),
+                    "prop": "revisions", "rvprop": "timestamp", "rvlimit": "1",
+                    "rvdir": "older", "rvstart": f"{probe.isoformat()}T23:59:59Z",
+                })
+                pages = data.get("query", {}).get("pages", [])
+                revisions = pages[0].get("revisions", []) if pages else []
+                if revisions:
+                    value = str(revisions[0].get("timestamp", ""))[:10]
+                    if start <= value <= end:
+                        probed_dates.append(value)
+            all_dates = sorted(set(probed_dates))
+        else:
+            all_dates = sorted(set(dates))
+        self._conn.execute(
+            "INSERT OR REPLACE INTO revision_date_cache("
+            "lang,title_folded,from_date,to_date,dates_json,fetched_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (*key, json.dumps(all_dates), datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+        return self._sample_revision_dates(all_dates, limit)
 
     def resolve_qid_title(self, qid: str) -> str:
         data = self._api_get(self.wikidata_url, {
@@ -301,6 +465,40 @@ class WikipediaPageBackend:
         if not link:
             raise WikipediaError(f"{qid} 沒有 {self.lang} Wikipedia sitelink")
         return normalize_title(link["title"])
+
+    def resolve_title_qid(self, title: str) -> str:
+        """Resolve a Wikipedia article title to its Wikidata item ID."""
+        data = self._api_get(self.api_url, {
+            "action": "query", "format": "json", "formatversion": "2",
+            "redirects": "1", "titles": normalize_title(title),
+            "prop": "pageprops", "ppprop": "wikibase_item",
+        })
+        pages = data.get("query", {}).get("pages", [])
+        if not pages or pages[0].get("missing"):
+            raise WikipediaError(f"Wikipedia 找不到頁面：{title}")
+        qid = pages[0].get("pageprops", {}).get("wikibase_item")
+        if not isinstance(qid, str) or not re.fullmatch(r"Q\d+", qid):
+            raise WikipediaError(f"Wikipedia 頁面 {title!r} 沒有 Wikidata item")
+        return qid
+
+    def get_wikidata_entities(
+        self, qids: list[str], *, props: str = "claims|labels|sitelinks"
+    ) -> dict[str, dict]:
+        """Fetch a bounded Wikidata entity batch through the official Action API."""
+        unique = list(dict.fromkeys(qid for qid in qids if re.fullmatch(r"Q\d+", qid)))
+        if not unique:
+            return {}
+        if len(unique) > 50:
+            raise ValueError("get_wikidata_entities accepts at most 50 QIDs per call")
+        data = self._api_get(self.wikidata_url, {
+            "action": "wbgetentities", "format": "json", "ids": "|".join(unique),
+            "props": props, "languages": "en", "sitefilter": f"{self.lang}wiki",
+        })
+        entities = data.get("entities", {})
+        return {
+            qid: value for qid, value in entities.items()
+            if isinstance(qid, str) and isinstance(value, dict) and not value.get("missing")
+        }
 
     def _cached_backlinks(self, title: str, as_of: str | None) -> list[str]:
         rows = self._conn.execute(

@@ -78,6 +78,8 @@ def temporal_reverse_bfs(
     max_depth: int,
     *,
     branch_cap: int = 25,
+    max_nodes: int = 500,
+    required_waypoints: list[dict] | None = None,
 ) -> dict:
     """Compute exact minimum navigation distance to a target page revision.
 
@@ -90,6 +92,10 @@ def temporal_reverse_bfs(
         raise ValueError("max_depth must be >= 0")
     if branch_cap <= 0:
         raise ValueError("branch_cap must be > 0")
+    if max_nodes <= 0:
+        raise ValueError("max_nodes must be > 0")
+    if required_waypoints and max_nodes < len(required_waypoints):
+        raise ValueError("max_nodes cannot be smaller than the required waypoint route")
     dates: list[str | None] = []
     for value in allowed_as_of:
         if value not in dates:
@@ -104,6 +110,7 @@ def temporal_reverse_bfs(
     shortest_next: dict[str, str] = {}
     shortest_edge_kind: dict[str, str] = {}
     frontier_keys: dict[int, list[str]] = {0: []}
+    truncated = False
 
     def add_state(
         page,
@@ -112,12 +119,17 @@ def temporal_reverse_bfs(
         *,
         next_key: str | None = None,
         edge_kind: str | None = None,
+        force: bool = False,
     ) -> tuple[str, bool]:
+        nonlocal truncated
         key = page_version_key(page.title, page.revision_id)
         if key in states:
             if as_of not in states[key]["as_of_tokens"]:
                 states[key]["as_of_tokens"].append(as_of)
             return key, False
+        if not force and len(states) >= max_nodes:
+            truncated = True
+            return "", False
         states[key] = {
             "key": key,
             "title": page.title,
@@ -135,13 +147,44 @@ def temporal_reverse_bfs(
         return key, True
 
     target_page = backend.fetch_page(pivot_title, as_of=target_as_of)
-    target_key, _ = add_state(target_page, target_as_of, 0)
+    target_key, _ = add_state(target_page, target_as_of, 0, force=True)
+
+    # A branch cap bounds *alternative* backlink discovery.  It must never
+    # evict the route whose minimality we are auditing merely because the
+    # intended predecessor sorts after the first N backlinks.  Seed the known
+    # route into the arena first; the edge-rebuild and reverse BFS below still
+    # recompute its true distance and expose any shorter route in the arena.
+    if required_waypoints:
+        expected_target = required_waypoints[-1]
+        required_target = backend.fetch_page(
+            expected_target["title"], as_of=expected_target["as_of"]
+        )
+        if page_version_key(required_target.title, required_target.revision_id) != target_key:
+            raise ValueError("required waypoint route does not end at the target revision")
+        next_key = target_key
+        next_page = required_target
+        for reverse_index, waypoint in enumerate(reversed(required_waypoints[:-1]), start=1):
+            page = backend.fetch_page(waypoint["title"], as_of=waypoint["as_of"])
+            edge_kind = (
+                "temporal"
+                if page.title.casefold() == next_page.title.casefold()
+                else "hyperlink"
+            )
+            next_key, _ = add_state(
+                page, waypoint["as_of"], reverse_index,
+                next_key=next_key, edge_kind=edge_kind, force=True,
+            )
+            next_page = page
 
     for depth in range(max_depth):
+        if truncated:
+            break
         current = list(frontier_keys.get(depth, []))
         if not current:
             break
         for current_key in current:
+            if truncated:
+                break
             state = states[current_key]
             state_as_of = state["as_of"]
 
@@ -177,6 +220,8 @@ def temporal_reverse_bfs(
                     state["title"], as_of=link_as_of, max_results=branch_cap
                 )
                 for source_title in sorted(sources, key=str.casefold):
+                    if truncated:
+                        break
                     try:
                         source = backend.fetch_page(source_title, as_of=link_as_of)
                     except WikipediaError:
@@ -265,12 +310,16 @@ def temporal_reverse_bfs(
     for label, values in allowed_titles_by_snapshot.items():
         allowed_titles_by_snapshot[label] = sorted(set(values), key=str.casefold)
 
+    offline_discovery = bool(getattr(backend, "offline_only", False))
     return {
         "target_key": target_key,
         "target": states[target_key],
         "allowed_as_of": dates,
         "max_depth": max_depth,
         "branch_cap": branch_cap,
+        "max_nodes": max_nodes,
+        "arena_truncated": truncated,
+        "discovery_mode": "offline_cache" if offline_discovery else "live_api",
         "states": states,
         "distances": distances,
         "frontiers": {
@@ -287,8 +336,15 @@ def temporal_reverse_bfs(
         "allowed_version_keys": sorted(states),
         "allowed_titles_by_snapshot": allowed_titles_by_snapshot,
         "coverage_note": (
-            "Historical backlink candidates come from current MediaWiki backlinks and are "
-            "verified against each selected revision; removed historical-only links may be missed."
+            (
+                "Offline discovery uses only backlink candidates already present in the local "
+                "revision cache; uncached alternatives are outside this arena. "
+                if offline_discovery else
+                "Historical backlink candidates come from current MediaWiki backlinks and are "
+                "verified against each selected revision; removed historical-only links may be missed. "
+            )
+            + f"Alternative discovery is capped at {max_nodes} page-version nodes"
+            + (" and reached that cap." if truncated else ".")
         ),
     }
 
@@ -306,6 +362,7 @@ def main():
     )
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--branch-cap", type=int, default=25)
+    parser.add_argument("--max-nodes", type=int, default=500)
     parser.add_argument("--cache-path", default="wikipedia_snapshot.db")
     parser.add_argument("--manifest", default="wikipedia_snapshot_manifest.json")
     parser.add_argument("--lang", default="en")
@@ -313,8 +370,8 @@ def main():
 
     if args.max_depth < 0:
         parser.error("--max-depth must be >= 0")
-    if args.branch_cap <= 0:
-        parser.error("--branch-cap must be > 0")
+    if args.branch_cap <= 0 or args.max_nodes <= 0:
+        parser.error("--branch-cap and --max-nodes must be > 0")
 
     with open(args.cases, "r", encoding="utf-8") as fh:
         cases = json.load(fh)["cases"]
@@ -361,7 +418,8 @@ def main():
             try:
                 navigation = temporal_reverse_bfs(
                     backend, target, target_as_of, dates, args.max_depth,
-                    branch_cap=args.branch_cap,
+                    branch_cap=args.branch_cap, max_nodes=args.max_nodes,
+                    required_waypoints=case.get("temporal_waypoints") or None,
                 )
             except (WikipediaError, ValueError) as exc:
                 print(f"[error] {case['id']}: {exc}")
@@ -381,6 +439,8 @@ def main():
                 "shortest_edge_kind": navigation["shortest_edge_kind"],
                 "arena_edges": navigation["arena_edges"],
                 "state_count": len(navigation["states"]),
+                "discovery_mode": navigation["discovery_mode"],
+                "arena_truncated": navigation["arena_truncated"],
                 "coverage_note": navigation["coverage_note"],
             })
     finally:
@@ -391,6 +451,7 @@ def main():
         "built_at": datetime.now(timezone.utc).isoformat(),
         "cache_path": args.cache_path, "lang": args.lang,
         "max_depth": args.max_depth, "branch_cap": args.branch_cap,
+        "max_nodes": args.max_nodes,
         "graph_policy": (
             "reverse BFS over verified same-snapshot hyperlinks plus repeatable temporal switches; "
             "first discovery is minimum directed distance to the target page revision"

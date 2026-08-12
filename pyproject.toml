@@ -1,7 +1,7 @@
 [project]
 name = "tkg-temporal-wikipedia-explorer"
-version = "0.11.0"
-description = "PK-admitted cutoff-relative multi-hop navigation over Wikipedia revisions"
+version = "0.16.0"
+description = "Renewable cutoff-relative multi-hop navigation over Wikipedia revisions"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = [
@@ -33,6 +33,10 @@ Issues = "https://github.com/Penguin1110/TKG/issues"
 [project.scripts]
 tkg-generate-cases = "tkg.experiment.question_generation:main"
 tkg-generate-multihop = "tkg.experiment.multihop_generation:main"
+tkg-discover-temporal-candidates = "tkg.experiment.temporal_candidate_discovery:main"
+tkg-profile-temporal-relations = "tkg.experiment.temporal_relation_profiler:main"
+tkg-renew-relation-registry = "tkg.experiment.temporal_relation_renewal:main"
+tkg-renew-questions = "tkg.experiment.renewable_question_engine:main"
 tkg-run = "tkg.experiment.temporal_runner:main"
 tkg-snapshot = "tkg.wikipedia.snapshot:main"
 tkg-validate-cases = "tkg.experiment.case_validation:main"

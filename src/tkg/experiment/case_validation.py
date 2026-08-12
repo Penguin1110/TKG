@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime
 
 from tkg.wikipedia.snapshot import page_version_key
 
 
-def validate_chain_route(case: dict, navigation: dict) -> dict | None:
-    """Prove the declared relation path exists and is shortest in the arena."""
+def validate_chain_route(
+    case: dict,
+    navigation: dict,
+    *,
+    require_raw_shortest: bool | None = None,
+) -> dict | None:
+    """Prove the semantic route exists and separately measure raw shortcuts.
+
+    New temporal-waypoint cases intentionally use a product-graph contract: a
+    later Wikipedia revision may retain old links, so raw hyperlink distance is
+    diagnostic rather than an admission gate.  Legacy cases retain the old
+    raw-shortest requirement by default.
+    """
     chain = case.get("reasoning_chain")
     if not chain:
         return None
@@ -47,17 +59,23 @@ def validate_chain_route(case: dict, navigation: dict) -> dict | None:
         raise ValueError(
             f"{case['id']}: expected_navigation_distance={expected}, route={route_distance}"
         )
-    shortest = navigation["distances"].get(route[0])
-    if shortest is None:
+    raw_shortest = navigation["distances"].get(route[0])
+    if raw_shortest is None:
         raise ValueError(f"{case['id']}: reasoning-chain anchor is absent from arena")
-    if shortest != route_distance:
+    if require_raw_shortest is None:
+        require_raw_shortest = not bool(case.get("temporal_waypoints"))
+    if require_raw_shortest and raw_shortest != route_distance:
         raise ValueError(
             f"{case['id']}: declared chain is not shortest; chain={route_distance}, "
-            f"arena minimum={shortest}"
+            f"arena minimum={raw_shortest}"
         )
     return {
         "start_title": case["start_title"], "start_key": route[0],
-        "distance": shortest, "route_keys": route, "edge_kinds": edge_kinds,
+        "distance": route_distance,
+        "semantic_distance": route_distance,
+        "raw_distance": raw_shortest,
+        "raw_shortest_match": raw_shortest == route_distance,
+        "route_keys": route, "edge_kinds": edge_kinds,
     }
 
 
@@ -98,6 +116,7 @@ def validate_case(case: dict, *, allow_legacy: bool = False) -> list[str]:
         chain = case.get("reasoning_chain")
         if not isinstance(chain, list) or len(chain) < 2:
             errors.append(f"{prefix}: reasoning_chain must contain at least two hops")
+            chain = []
         else:
             if case.get("reasoning_hop_count") != len(chain):
                 errors.append(f"{prefix}: reasoning_hop_count does not match chain")
@@ -127,12 +146,92 @@ def validate_case(case: dict, *, allow_legacy: bool = False) -> list[str]:
                     right.get("source_title", "")
                 ).casefold():
                     errors.append(f"{prefix}: disconnected reasoning hops {index}->{index + 1}")
+                try:
+                    left_time = datetime.fromisoformat(
+                        str(left.get("as_of", "")).replace("Z", "+00:00")
+                    )
+                    right_time = datetime.fromisoformat(
+                        str(right.get("as_of", "")).replace("Z", "+00:00")
+                    )
+                    policy = right.get("incoming_time_policy", "advance_required")
+                    if policy == "advance_required" and right_time <= left_time:
+                        errors.append(
+                            f"{prefix}: hop {index + 1} must use a later snapshot"
+                        )
+                    elif policy == "same_snapshot" and right_time != left_time:
+                        errors.append(
+                            f"{prefix}: hop {index + 1} must retain the same snapshot"
+                        )
+                    elif policy not in {"advance_required", "same_snapshot"}:
+                        errors.append(
+                            f"{prefix}: hop {index + 1} has invalid incoming_time_policy"
+                        )
+                except ValueError:
+                    errors.append(f"{prefix}: invalid reasoning-hop timestamp")
+        waypoints = case.get("temporal_waypoints")
+        expected_edges = []
+        temporal_switches = 0
+        for index, hop in enumerate(chain):
+            policy = hop.get("incoming_time_policy", "advance_required")
+            if index == 0 or policy != "same_snapshot":
+                expected_edges.append((
+                    hop.get("source_title"), hop.get("source_revision_id"),
+                    "start" if index == 0 else "temporal",
+                ))
+                if index > 0:
+                    temporal_switches += 1
+            expected_edges.append((
+                hop.get("target_title"), hop.get("target_revision_id"), "hyperlink",
+            ))
+        if not isinstance(waypoints, list) or len(waypoints) != len(expected_edges):
+            errors.append(
+                f"{prefix}: temporal_waypoints do not match temporal/same-snapshot hops"
+            )
+        else:
+            for index, (waypoint, expected) in enumerate(zip(waypoints, expected_edges)):
+                title, revision_id, incoming = expected
+                if not isinstance(waypoint, dict):
+                    errors.append(f"{prefix}: waypoint {index} is not an object")
+                    continue
+                if waypoint.get("index") != index:
+                    errors.append(f"{prefix}: waypoint {index} has wrong index")
+                if str(waypoint.get("title", "")).casefold() != str(title).casefold():
+                    errors.append(f"{prefix}: waypoint {index} title does not match chain")
+                if waypoint.get("revision_id") != revision_id:
+                    errors.append(f"{prefix}: waypoint {index} revision does not match chain")
+                if waypoint.get("incoming_edge") != incoming:
+                    errors.append(f"{prefix}: waypoint {index} incoming edge is invalid")
+            semantic_distance = len(waypoints) - 1
+            if case.get("semantic_shortest_distance") != semantic_distance:
+                errors.append(f"{prefix}: semantic_shortest_distance does not match waypoints")
+            if case.get("expected_navigation_distance") != semantic_distance:
+                errors.append(f"{prefix}: expected_navigation_distance does not match waypoints")
+            if case.get("required_temporal_switches") != temporal_switches:
+                errors.append(f"{prefix}: required_temporal_switches does not match chain")
         cutoff = case.get("knowledge_cutoff")
         if not isinstance(cutoff, dict) or not cutoff.get("cutoff_date"):
             errors.append(f"{prefix}: multi-hop case missing knowledge_cutoff")
         required_dates = case.get("required_snapshot_dates")
         if not isinstance(required_dates, list) or len(required_dates) < 2:
             errors.append(f"{prefix}: multi-hop case needs at least two snapshot dates")
+        generation = case.get("_generation", {})
+        if generation.get("question_style") == "short_ordered_steps_v1":
+            question = str(case.get("temporal_question", ""))
+            sentences = [
+                value.strip() for value in re.split(r"(?<=[.!?])\s+", question)
+                if value.strip()
+            ]
+            if len(sentences) < len(chain) + 1:
+                errors.append(
+                    f"{prefix}: short-step question must separate relation hops"
+                )
+            if any(len(sentence.split()) > 32 for sentence in sentences):
+                errors.append(
+                    f"{prefix}: short-step question contains a sentence over 32 words"
+                )
+            canonical = generation.get("canonical_question")
+            if not isinstance(canonical, str) or not canonical.strip():
+                errors.append(f"{prefix}: missing canonical audit question")
     return errors
 
 
