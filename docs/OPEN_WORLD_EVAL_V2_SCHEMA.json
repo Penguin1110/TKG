@@ -1,0 +1,91 @@
+{
+  "schema_version": "open-world-temporal-evaluation-schema-descriptor-v2",
+  "track": "open_world_temporal_graph_navigation",
+  "public_inference_case": {
+    "fields": [
+      "case_id",
+      "model_id",
+      "question",
+      "start_page",
+      "cutoff_date",
+      "target_date"
+    ],
+    "forbidden": [
+      "accepted_final_answer_aliases",
+      "critical_claims",
+      "witnesses",
+      "reference_routes",
+      "Wikidata QIDs",
+      "distance_to_reference",
+      "expected next actions"
+    ]
+  },
+  "private_evaluation_case": {
+    "schema_version": "open-world-temporal-evaluation-case-v2",
+    "fields": {
+      "accepted_final_answer_aliases": "Final-answer normalization only",
+      "critical_claims": "Required post-cutoff temporal claims",
+      "tail_relation": "Required final composition relation",
+      "validated_evidence_requirements": "Literal and semantic support policy",
+      "event_time_constraints": "World-event or tenure-onset constraints",
+      "reference_routes": "Feasibility witnesses and post-hoc diagnostics only"
+    }
+  },
+  "claim": {
+    "fields": [
+      "claim_id",
+      "subject",
+      "relation",
+      "object",
+      "event_time",
+      "witnesses"
+    ],
+    "witness_fields": [
+      "page_title",
+      "revision_id",
+      "evidence_excerpt",
+      "evidence_hash",
+      "support_type",
+      "validation_status",
+      "semantic_validation"
+    ],
+    "multiplicity": "one_or_more_semantically_equivalent_witnesses"
+  },
+  "structured_submission": {
+    "schema_version": "structured-temporal-evidence-submission-v2",
+    "fields": ["answer", "critical_claims", "tail_claim"],
+    "submitted_claim_fields": [
+      "claim_id",
+      "subject",
+      "relation",
+      "object",
+      "event_time",
+      "supporting_evidence_ids"
+    ]
+  },
+  "action_funnel": {
+    "schema_version": "temporal-solver-action-funnel-v2",
+    "layers": [
+      "environment_legal_actions",
+      "solver_retrieved_actions",
+      "compacted_ranker_actions",
+      "ranker_scores",
+      "expanded_actions"
+    ],
+    "large_set_rule": "Store complete count, SHA-256, and immutable artifact reference"
+  },
+  "primary_metrics": [
+    "end_to_end_validated_answer_accuracy",
+    "critical_bridge_acquisition_rate",
+    "semantically_supported_submission_rate",
+    "temporally_valid_submission_rate"
+  ],
+  "diagnostic_metrics": [
+    "reference_link_retrieval_rate",
+    "reference_witness_revision_retrieval_rate",
+    "reference_route_completion_rate",
+    "rank_of_reference_action_conditional_on_inclusion_and_valid_ranker",
+    "beam_survival_conditional_on_candidate_inclusion",
+    "tool_infrastructure_failure_rate"
+  ]
+}

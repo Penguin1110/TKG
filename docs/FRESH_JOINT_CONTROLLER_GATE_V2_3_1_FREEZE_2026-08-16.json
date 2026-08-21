@@ -1,0 +1,69 @@
+{
+  "schema_version": "fresh-joint-controller-gate-freeze-v2.3.1",
+  "frozen_at": "2026-08-16",
+  "status": "frozen_before_first_model_run",
+  "runner_freeze": {
+    "path": "docs/OPEN_WORLD_LIVE_RUNNER_V2_3_1_FREEZE_2026-08-16.json",
+    "sha256": "9c34c65e5be648ce87f8ff730e0fef2922eef92b6065d7b51fc0933c57f237be"
+  },
+  "joint_controller_source_sha256": "064829f005e4f8a654b4142b78a92c3d7ddc66eeade3622c4f39ca97d7acdaae",
+  "gate_implementation": {
+    "path": "src/tkg/experiment/joint_controller_gate_v231.py",
+    "sha256": "b5a9b81dc34cc1206e9f6dfa03d1f4603eafd1c0f71135f8081bdda83de58b4d"
+  },
+  "state_manifest": {
+    "path": "examples/temporal_eval_v23/fresh_joint_gate_manifest_v231.json",
+    "sha256": "4353d020ed81970d40e220fdbfc38fecd426d20d16430630d6c19b27e7d6c01f",
+    "navigation": 20,
+    "positive_submission": 20,
+    "negative_submission": 20,
+    "total": 60
+  },
+  "navigation_contract": {
+    "candidate_actions_per_state": 30,
+    "progress_actions_per_state": 2,
+    "multiple_progress_actions_allowed": true,
+    "unique_gold_action_assumed": false,
+    "primary_metrics": [
+      "any progress action in top 3",
+      "best progress utility strictly exceeds every distractor utility"
+    ]
+  },
+  "submission_contract": {
+    "positive_states": "complete bridge, event time, and tail evidence",
+    "negative_families": [
+      "missing_tail",
+      "missing_bridge",
+      "missing_event_time",
+      "relation_mismatch"
+    ],
+    "positive_metric": "public-gate-valid structured submission",
+    "negative_metric": "public-gate-valid false submission"
+  },
+  "thresholds": {
+    "navigation_any_progress_recall_at_3_min": 0.90,
+    "navigation_strict_progress_separation_rate_min": 0.80,
+    "positive_valid_submission_recall_min": 0.90,
+    "negative_false_submit_rate_max": 0.05,
+    "dense_ranking_contract_pass_rate": 1.00,
+    "evidence_ownership_pass_rate": 1.00,
+    "gold_leakage": 0
+  },
+  "model": {
+    "id": "openai/gpt-5.4-mini",
+    "temperature": 0.0,
+    "seed_in_prompt": 31,
+    "maximum_retry": 1
+  },
+  "leakage_boundary": {
+    "model_input": "public case, visible evidence, candidate actions, and budget only",
+    "posthoc_labels_enter_prompt": false,
+    "navigation_progress_ids_enter_prompt": false,
+    "positive_negative_label_enters_prompt": false
+  },
+  "decision": {
+    "gate_pass_requires_all_thresholds": true,
+    "failure_locks_fresh_real_case_generation": true,
+    "prompt_or_threshold_tuning_after_result": false
+  }
+}

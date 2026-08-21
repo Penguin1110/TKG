@@ -18,6 +18,9 @@ ALLOWED_TEMPORAL_LABELS = {
     "correct_after", "old_snapshot_answer", "supported_other_time",
     "correct_without_visible_support", "unsupported", "no_answer", "unjudgeable",
 }
+ALLOWED_PRIOR_KNOWLEDGE_LABELS = {
+    "known", "unknown", "wrong", "unjudgeable",
+}
 
 
 def _fold_text(value: str) -> str:
@@ -26,9 +29,14 @@ def _fold_text(value: str) -> str:
     )
 
 
-def _matched_aliases(response: str, aliases: list[str]) -> list[str]:
-    """Return aliases explicitly present as complete normalized spans."""
-    folded = _fold_text(response)
+def _fold_response_span(value: str) -> str:
+    """Normalize harmless inline Markdown before checking judge provenance."""
+    return _fold_text(re.sub(r"[*_`~]", "", value))
+
+
+def _mentioned_aliases(text: str, aliases: list[str]) -> list[str]:
+    """Return aliases mentioned as complete spans, without asserting correctness."""
+    folded = _fold_text(text)
     matches = []
     for alias in aliases:
         candidate = _fold_text(alias)
@@ -37,6 +45,31 @@ def _matched_aliases(response: str, aliases: list[str]) -> list[str]:
         if folded == candidate or re.search(
             rf"(?<!\w){re.escape(candidate)}(?!\w)", folded
         ):
+            matches.append(alias)
+    return matches
+
+
+def _direct_alias_matches(response: str, aliases: list[str]) -> list[str]:
+    """Match only concise affirmative answers; complex language goes to the LLM.
+
+    Presence alone is unsafe: ``not Alice`` and ``the page mentions Alice`` are
+    mentions, not answers.  The deterministic path therefore accepts only an
+    alias by itself or a small set of unambiguously affirmative wrappers.
+    """
+    folded = _fold_text(response).strip()
+    matches = []
+    for alias in aliases:
+        candidate = _fold_text(alias)
+        if not candidate:
+            continue
+        escaped = re.escape(candidate)
+        patterns = (
+            rf"{escaped}[.!]?",
+            rf"(?:the\s+)?answer\s*(?:is|was|:)\s*[\"']?{escaped}[\"']?[.!]?",
+            rf"(?:it|this|that)\s+(?:is|was)\s+[\"']?{escaped}[\"']?[.!]?",
+            rf"my\s+(?:final\s+)?answer\s*(?:is|:)\s*[\"']?{escaped}[\"']?[.!]?",
+        )
+        if any(re.fullmatch(pattern, folded) for pattern in patterns):
             matches.append(alias)
     return matches
 
@@ -56,8 +89,8 @@ def _require_extracted_answer_in_response(
     """Fail closed when a judge invents an answer absent from model output."""
     if result.decision not in positive_labels:
         return result
-    extracted = _fold_text(result.answer_extracted)
-    folded_response = _fold_text(response)
+    extracted = _fold_response_span(result.answer_extracted)
+    folded_response = _fold_response_span(response)
     if extracted and extracted in folded_response:
         return result
     result.raw = {
@@ -66,6 +99,32 @@ def _require_extracted_answer_in_response(
         "original_decision": result.decision,
     }
     result.decision = "unjudgeable"
+    return result
+
+
+def _require_label_alias_support(
+    result: JudgeResult, label_aliases: dict[str, list[str]],
+) -> JudgeResult:
+    """Reject a stale/current alias label when that alias class is undefined."""
+    aliases = label_aliases.get(result.decision)
+    if aliases is None:
+        return result
+    # With configured aliases, the LLM fallback may legitimately recognize a
+    # spelling or abbreviation not listed verbatim. The extracted-answer gate
+    # still requires that value to occur in the tested response.
+    if aliases:
+        return result
+    original = result.decision
+    result.raw = {
+        **result.raw,
+        "original_decision": original,
+        "contract_violation": "positive_label_without_configured_aliases",
+    }
+    result.decision = "unsupported"
+    result.confidence = 1.0
+    result.reason = (
+        f"Judge returned {original!r}, but that label has no configured aliases."
+    )
     return result
 
 
@@ -136,7 +195,8 @@ class LLMJudge:
     SYSTEM = (
         "You are an independent evaluator for a temporal knowledge browsing experiment. "
         "Judge only from the supplied evidence and rubric. Do not reward the desired research "
-        "hypothesis. Return one JSON object and no prose. Evidence excerpts must be short."
+        "hypothesis. Return one JSON object and no prose. Confidence must be a JSON number "
+        "from 0 through 1, never a word or label. Evidence excerpts must be short."
     )
 
     def __init__(
@@ -254,8 +314,8 @@ decision must be answerable, not_answerable, ambiguous, or unjudgeable.
         old_answers: list[str],
         pages: list[dict],
     ) -> JudgeResult:
-        new_matches = _matched_aliases(response, new_answers)
-        old_matches = _matched_aliases(response, old_answers)
+        new_matches = _direct_alias_matches(response, new_answers)
+        old_matches = _direct_alias_matches(response, old_answers)
         if new_matches and not old_matches:
             return _deterministic_result(
                 "stick_new", response, new_matches[0], "exact_new_alias"
@@ -290,9 +350,93 @@ Return keys: decision, confidence, answer_extracted, evidence, reason.
         result = self._apply_confidence_gate(self._result(self._call(prompt)))
         if result.decision not in ALLOWED_ANSWER_LABELS:
             result.decision = "unjudgeable"
-        return _require_extracted_answer_in_response(
+        result = _require_extracted_answer_in_response(
             result, response, {"stick_new", "stick_old"},
         )
+        return _require_label_alias_support(result, {
+            "stick_new": new_answers,
+            "stick_old": old_answers,
+        })
+
+    def judge_prior_knowledge(
+        self,
+        *,
+        probe_role: str,
+        question: str,
+        response: str,
+        answer_aliases: list[str],
+        context_aliases: list[str] | None = None,
+    ) -> JudgeResult:
+        """Judge one factorized fact, never the names used as question context."""
+        context_aliases = list(context_aliases or [])
+        direct = _direct_alias_matches(response, answer_aliases)
+        if direct:
+            return _deterministic_result(
+                "known", response, direct[0], "exact_probe_answer_alias",
+            )
+        prompt = f"""Task: classify prior knowledge for one isolated factual probe.
+
+Probe role: {probe_role}
+Exact probe question: {question}
+Tested model response: {response}
+Correct answer aliases for THIS probe only:
+{json.dumps(answer_aliases, ensure_ascii=False)}
+Known context/intermediate aliases that are NOT answers to this probe:
+{json.dumps(context_aliases, ensure_ascii=False)}
+
+Labels:
+- known: clearly gives the correct answer to this exact probe.
+- unknown: explicitly says it does not know the answer and gives no candidate answer.
+- wrong: gives a concrete answer to this exact probe, but it is not the correct alias.
+- unjudgeable: mixed, malformed, ambiguous, or impossible to classify confidently.
+
+Critical rules:
+- Judge only the answer requested by the exact probe.
+- Names already present in the question are context, not candidate answers.
+- For a composed probe, the response may correctly solve early steps before saying the
+  final answer is unknown. Every supplied context/intermediate alias is explicitly not
+  the final answer; never label the probe wrong merely because one appears.
+- Do not label a response wrong merely because it repeats a person, office, or date from
+  the question before saying that the requested answer is unknown.
+- answer_extracted must be one plain string copied from the tested response. Use an empty
+  string for unknown. Do not return an object, list, summary, or multiple hop answers.
+
+Return keys: decision, confidence, answer_extracted, evidence, reason.
+"""
+        result = self._apply_confidence_gate(self._result(self._call(prompt)))
+        if result.decision not in ALLOWED_PRIOR_KNOWLEDGE_LABELS:
+            result.decision = "unjudgeable"
+        result = _require_extracted_answer_in_response(
+            result, response, {"known", "wrong"},
+        )
+        if result.decision == "known" and not _mentioned_aliases(
+            result.answer_extracted, answer_aliases,
+        ):
+            result.raw = {
+                **result.raw,
+                "contract_violation": "known_answer_not_in_probe_aliases",
+                "original_decision": "known",
+            }
+            result.decision = "unjudgeable"
+        if result.decision == "wrong" and _mentioned_aliases(
+            result.answer_extracted, context_aliases,
+        ):
+            result.raw = {
+                **result.raw,
+                "contract_violation": "wrong_answer_is_context_alias",
+                "original_decision": "wrong",
+            }
+            result.decision = "unjudgeable"
+        if result.decision == "unknown" and _mentioned_aliases(
+            response, answer_aliases,
+        ):
+            result.raw = {
+                **result.raw,
+                "contract_violation": "unknown_response_mentions_correct_alias",
+                "original_decision": "unknown",
+            }
+            result.decision = "unjudgeable"
+        return result
 
     def judge_temporal_answer(
         self,
@@ -313,14 +457,14 @@ Return keys: decision, confidence, answer_extracted, evidence, reason.
                 answer_extracted="",
                 raw={"deterministic_gate": "blank_response"},
             )
-        after_matches = _matched_aliases(response, after_answers)
-        before_matches = _matched_aliases(response, before_answers)
+        after_matches = _direct_alias_matches(response, after_answers)
+        before_matches = _direct_alias_matches(response, before_answers)
         if after_matches and not before_matches:
             alias = after_matches[0]
             target_support = any(
                 (target_snapshot_as_of is None
                  or page.get("as_of") == target_snapshot_as_of)
-                and bool(_matched_aliases(str(page.get("content", "")), [alias]))
+                and bool(_mentioned_aliases(str(page.get("content", "")), [alias]))
                 for page in pages
             )
             return _deterministic_result(
@@ -361,10 +505,14 @@ confidence, answer_extracted, evidence, reason. Evidence must be a short excerpt
         result = self._apply_confidence_gate(self._result(self._call(prompt)))
         if result.decision not in ALLOWED_TEMPORAL_LABELS:
             result.decision = "unjudgeable"
-        return _require_extracted_answer_in_response(
+        result = _require_extracted_answer_in_response(
             result, response,
             {"correct_after", "old_snapshot_answer", "supported_other_time"},
         )
+        return _require_label_alias_support(result, {
+            "correct_after": after_answers,
+            "old_snapshot_answer": before_answers,
+        })
 
 
 def transition_label(previous: str | None, current: str) -> str:

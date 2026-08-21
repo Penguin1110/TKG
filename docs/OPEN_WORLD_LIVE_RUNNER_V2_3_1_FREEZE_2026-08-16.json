@@ -1,0 +1,45 @@
+{
+  "schema_version": "open-world-temporal-live-runner-freeze-v2.3.1",
+  "frozen_at": "2026-08-16",
+  "status": "terminal_only_patch_frozen",
+  "base_freeze": {
+    "path": "docs/OPEN_WORLD_LIVE_RUNNER_V2_3_FREEZE_2026-08-16.json",
+    "sha256": "b0640b53568b53b635fde4628e4bb807b3600894586b0f388a973042f7706893"
+  },
+  "allowed_change": {
+    "condition": "joint controller returned no executable child",
+    "behavior": "return an auditable exhausted_no_legal_progress terminal state",
+    "complete_trajectory_available": true,
+    "success": false
+  },
+  "unchanged_contracts": {
+    "joint_controller_source_sha256": "064829f005e4f8a654b4142b78a92c3d7ddc66eeade3622c4f39ca97d7acdaae",
+    "v2_3_runner_source_sha256": "4509925d730ea2fa58b2764868d5ccbdfe7bb506ba77deb58b5978dccb1b76b8",
+    "prompt": "unchanged",
+    "response_schema": "unchanged",
+    "compaction": "unchanged",
+    "scores_and_normalization": "unchanged",
+    "tie_break": "unchanged",
+    "search_and_expansion_policy": "unchanged",
+    "model_cache": "unchanged"
+  },
+  "patch_files": {
+    "src/tkg/experiment/temporal_live_runner_v231.py": "5b78a4487349891617e98eb575680b8cc274c065a2a5e0496a99d1e74738531b",
+    "src/tkg/experiment/temporal_live_v231_replay.py": "a317def80c39925dc485291a0dad4520029ebcb932ccabada74b4ce346be52dd",
+    "tests/test_temporal_live_runner_v231.py": "d71da3c55aa9727d02ef8e514d178423d8c911a13bbf89b3fa9df5c6ffeaa8f2",
+    "examples/temporal_eval_v23/joint_api_gpt54mini_replay_v231.json": "209057ea6a54f66bd2438e9c7d005eee50808a56e02bde0107ec3b29f5e77052"
+  },
+  "cached_replay": {
+    "cached_responses": 5,
+    "new_model_calls": 0,
+    "success": false,
+    "terminal_status": "exhausted_no_legal_progress",
+    "complete_trajectory_available": true,
+    "runtime_error": false
+  },
+  "research_claims": {
+    "benchmark_accuracy": false,
+    "graph_integrated_decoding": false,
+    "method_superiority": false
+  }
+}

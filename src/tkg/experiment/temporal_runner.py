@@ -9,23 +9,30 @@ import json
 import os
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from tkg.api.openrouter import OpenRouterError, call_model
+from tkg.api.openrouter import (
+    OpenRouterError, UsageLedger, call_model, model_call_context,
+    set_usage_ledger,
+)
 from tkg.experiment.case_validation import validate_cases, validate_chain_route
+from tkg.experiment.human_review import resolve_human_reviews
 from tkg.experiment.model_cutoffs import model_matches_cutoff
 from tkg.experiment.results import JsonlResultStore, assert_new_output_path
 from tkg.judging.llm import LLMJudge
-from tkg.wikipedia.backend import WikipediaError, WikipediaPageBackend
+from tkg.wikipedia.backend import (
+    WikimediaRequestThrottle, WikipediaError, WikipediaPageBackend,
+)
 from tkg.wikipedia.browser import run_temporal_browsing
 from tkg.wikipedia.snapshot import (
     configured_pivot, page_version_key, temporal_reverse_bfs,
 )
 
 
-CONTRACT_SCHEMA = "temporal-pk-relative-multihop-v7"
+CONTRACT_SCHEMA = "temporal-pk-relative-multihop-v11"
 
 
 def _question(case: dict) -> str:
@@ -44,29 +51,269 @@ def _case_endpoints(case: dict) -> tuple[str | None, str | None]:
 
 
 PK_PROBE_VARIANTS = (
-    "Answer with your best direct recall.",
-    "Try to retrieve the specific name before deciding that you do not know.",
-    "Give one concise best-effort answer; uncertainty is allowed.",
-    "Independently reconsider the question and state the most likely answer.",
-    "Make a final fresh attempt from memory only, without tools.",
+    "Answer the factual question directly from memory.",
+    "Give one concise best-effort answer from memory.",
+    "State the most likely answer you can recall.",
+    "Independently answer the factual question from memory.",
+    "Give your final concise answer from memory.",
 )
 
 
-def _pk_prompt(case: dict, target_as_of: str | None, variant_index: int = 0) -> str:
-    target = target_as_of or "CURRENT"
-    cutoff = case.get("knowledge_cutoff", {}).get("cutoff_date")
-    cutoff_line = (
-        f"Registered knowledge-cutoff snapshot for this tested model: {cutoff}\n"
-        if cutoff else ""
-    )
+def _pk_prompt(
+    case: dict,
+    target_as_of: str | None,
+    variant_index: int = 0,
+    *,
+    probe: dict | None = None,
+) -> str:
+    # Keep experimental metadata in the stored record, never in the tested-model
+    # prompt. In particular, role/objective/cutoff/target labels would reveal which
+    # fact the admission gate expects the model not to know.
+    del target_as_of
+    question = str(probe["question"]) if probe is not None else _question(case)
     return (
-        f"Question: {_question(case)}\n"
-        f"Target date: {target}\n\n"
-        f"{cutoff_line}"
-        f"Probe instruction: {PK_PROBE_VARIANTS[variant_index % len(PK_PROBE_VARIANTS)]}\n"
-        "Answer directly using only your existing knowledge. Do not browse, use tools, or "
-        "assume access to external sources. If you do not know, say so briefly."
+        f"Question: {question}\n"
+        f"Instruction: {PK_PROBE_VARIANTS[variant_index % len(PK_PROBE_VARIANTS)]} "
+        "Use no tools or external sources. Return only the final answer, without "
+        "intermediate reasoning."
     )
+
+
+def _factorized_pk_probes(case: dict) -> list[dict]:
+    """Validate and return an optional bridge/tail/composed PK contract."""
+    contract = case.get("prior_knowledge_contract")
+    if contract is None:
+        return []
+    if not isinstance(contract, dict):
+        raise ValueError("prior_knowledge_contract must be an object")
+    contract_version = contract.get("schema_version")
+    if contract_version not in {
+        "factorized-prior-knowledge-v1", "factorized-prior-knowledge-v2",
+    }:
+        raise ValueError("unsupported prior_knowledge_contract schema")
+    raw_probes = contract.get("probes")
+    if not isinstance(raw_probes, list) or not raw_probes:
+        raise ValueError("factorized prior-knowledge contract has no probes")
+
+    probes: list[dict] = []
+    seen_ids: set[str] = set()
+    allowed_objectives = {
+        "diagnostic", "must_be_unknown", "measure_known_for_composition",
+        "diagnostic_only",
+    }
+    for index, raw in enumerate(raw_probes):
+        if not isinstance(raw, dict):
+            raise ValueError(f"prior-knowledge probe {index} must be an object")
+        probe_id = str(raw.get("id") or "").strip()
+        role = str(raw.get("role") or "").strip()
+        objective = str(raw.get("objective") or "").strip()
+        question = str(raw.get("question") or "").strip()
+        aliases = raw.get("answer_aliases")
+        if not probe_id or probe_id in seen_ids:
+            raise ValueError(f"invalid or duplicate prior-knowledge probe id {probe_id!r}")
+        if not role or objective not in allowed_objectives or not question:
+            raise ValueError(f"prior-knowledge probe {probe_id!r} is incomplete")
+        if not isinstance(aliases, list) or not aliases or not all(
+            isinstance(value, str) and value.strip() for value in aliases
+        ):
+            raise ValueError(
+                f"prior-knowledge probe {probe_id!r} needs non-empty answer aliases"
+            )
+        seen_ids.add(probe_id)
+        probes.append({
+            **raw,
+            "id": probe_id,
+            "role": role,
+            "objective": objective,
+            "question": question,
+            "answer_aliases": [str(value).strip() for value in aliases],
+        })
+    primary_role = str(contract.get("primary_admission_role") or "")
+    primary = [
+        probe for probe in probes
+        if probe["objective"] == "must_be_unknown" and probe["role"] == primary_role
+    ]
+    if not primary:
+        raise ValueError(
+            "factorized prior-knowledge contract has no primary must_be_unknown probe"
+        )
+    if any(
+        probe["objective"] == "must_be_unknown" and probe["role"] != primary_role
+        for probe in probes
+    ):
+        raise ValueError(
+            "every must_be_unknown probe must use the primary admission role"
+        )
+    if contract_version == "factorized-prior-knowledge-v2":
+        raw_primary_ids = contract.get("primary_admission_probe_ids")
+        if not isinstance(raw_primary_ids, list) or not raw_primary_ids:
+            raise ValueError(
+                "factorized prior-knowledge v2 needs primary_admission_probe_ids"
+            )
+        primary_ids = [str(value) for value in raw_primary_ids]
+        if len(primary_ids) != len(set(primary_ids)):
+            raise ValueError("primary_admission_probe_ids must be unique")
+        objective_ids = {
+            probe["id"] for probe in probes
+            if probe["objective"] == "must_be_unknown"
+        }
+        if set(primary_ids) != objective_ids:
+            raise ValueError(
+                "primary_admission_probe_ids must exactly name every "
+                "must_be_unknown probe"
+            )
+    return probes
+
+
+def _run_factorized_pk_admission(
+    *,
+    case: dict,
+    probes: list[dict],
+    model: str,
+    target_as_of: str | None,
+    judge: LLMJudge,
+    store: JsonlResultStore,
+    repeats: int,
+    max_known_rate: float,
+    temperatures: list[float],
+    probe_call_model_fn,
+) -> dict:
+    observations: dict[str, list[str]] = {probe["id"]: [] for probe in probes}
+    deterministic_judgments = 0
+    for probe in probes:
+        for probe_repeat in range(repeats):
+            prompt = _pk_prompt(
+                case, target_as_of, probe_repeat, probe=probe,
+            )
+            probe_temperature = temperatures[probe_repeat]
+            context = {
+                "case_id": case["id"], "tested_model": model,
+                "probe_repeat": probe_repeat, "probe_id": probe["id"],
+                "probe_role": probe["role"],
+            }
+            with model_call_context(role="pk_probe", **context):
+                response = probe_call_model_fn(
+                    model, [{"role": "user", "content": prompt}],
+                    temperature=probe_temperature,
+                )
+            with model_call_context(role="pk_fact_judge", **context):
+                judgment = judge.judge_prior_knowledge(
+                    probe_role=probe["role"], question=probe["question"],
+                    response=response, answer_aliases=probe["answer_aliases"],
+                    context_aliases=probe.get("context_aliases", []),
+                )
+            observations[probe["id"]].append(judgment.decision)
+            deterministic = bool(judgment.raw.get("deterministic_gate"))
+            deterministic_judgments += int(deterministic)
+            store.write(
+                slot="pk_probe", case_id=case["id"], model=model,
+                arm="admission", probe_repeat=probe_repeat,
+                probe_id=probe["id"], probe_role=probe["role"],
+                probe_objective=probe["objective"],
+                target_snapshot_as_of=target_as_of, prompt=prompt,
+                response=response, judgment=judgment.to_dict(),
+                label=judgment.decision, fresh_context=True,
+                tools_available=False,
+                probe_variant=probe_repeat % len(PK_PROBE_VARIANTS),
+                probe_temperature=probe_temperature,
+                judge_mode=(
+                    "deterministic_alias" if deterministic else "llm_fallback"
+                ),
+            )
+
+    summaries = []
+    for probe in probes:
+        labels = observations[probe["id"]]
+        counts = {label: labels.count(label) for label in sorted(set(labels))}
+        summaries.append({
+            "id": probe["id"], "role": probe["role"],
+            "objective": probe["objective"], "n": repeats,
+            "label_counts": counts,
+            "known_count": counts.get("known", 0),
+            "known_rate": counts.get("known", 0) / repeats,
+            "unknown_count": counts.get("unknown", 0),
+            "wrong_count": counts.get("wrong", 0),
+            "unjudgeable_count": counts.get("unjudgeable", 0),
+        })
+
+    primary = [
+        summary for summary in summaries
+        if summary["objective"] == "must_be_unknown"
+    ]
+    primary_n = sum(summary["n"] for summary in primary)
+    known_count = sum(summary["known_count"] for summary in primary)
+    unjudgeable_count = sum(
+        summary["unjudgeable_count"] for summary in primary
+    )
+    known_rate = known_count / primary_n
+    passed = unjudgeable_count == 0 and all(
+        summary["known_rate"] <= max_known_rate for summary in primary
+    )
+    if unjudgeable_count:
+        reason = "unjudgeable_critical_bridge_probe"
+    elif not passed:
+        reason = "already_knows_critical_bridge"
+    else:
+        reason = "critical_bridge_not_known"
+
+    def role_known_rate(role: str) -> float | None:
+        selected = [summary for summary in summaries if summary["role"] == role]
+        count = sum(summary["n"] for summary in selected)
+        if not count:
+            return None
+        return sum(summary["known_count"] for summary in selected) / count
+
+    def role_unjudgeable_count(role: str) -> int:
+        return sum(
+            summary["unjudgeable_count"] for summary in summaries
+            if summary["role"] == role
+        )
+
+    tail_known_rate = role_known_rate("tail")
+    composed_known_rate = role_known_rate("composed")
+    total_judgments = len(probes) * repeats
+    gate = {
+        "pk_contract_version": case["prior_knowledge_contract"]["schema_version"],
+        "n": primary_n,
+        "label_counts": {
+            label: sum(
+                summary["label_counts"].get(label, 0) for summary in primary
+            )
+            for label in ("known", "unknown", "wrong", "unjudgeable")
+        },
+        # Backward-compatible columns now explicitly refer to the critical bridge.
+        "stick_new_count": known_count,
+        "stick_new_rate": known_rate,
+        "stick_old_count": 0,
+        "stick_old_rate": 0.0,
+        "other_count": primary_n - known_count,
+        "critical_bridge_known_count": known_count,
+        "critical_bridge_known_rate": known_rate,
+        "tail_known_rate": tail_known_rate,
+        "composed_known_rate": composed_known_rate,
+        "clean_bridge_composition_candidate": bool(
+            passed
+            and tail_known_rate == 1.0
+            and role_unjudgeable_count("tail") == 0
+            and composed_known_rate == 0.0
+            and role_unjudgeable_count("composed") == 0
+        ),
+        "probe_summaries": summaries,
+        "total_probe_judgments": total_judgments,
+        "max_known_rate": max_known_rate,
+        "passed": passed,
+        "reason": reason,
+        "target_snapshot_as_of": target_as_of,
+        "temperature_schedule": temperatures,
+        "probe_method": "fresh_context_factorized_fact_ensemble",
+        "deterministic_judgments": deterministic_judgments,
+        "llm_fallback_judgments": total_judgments - deterministic_judgments,
+    }
+    store.write(
+        slot="pk_gate", case_id=case["id"], model=model,
+        arm="admission", **gate,
+    )
+    return gate
 
 
 def run_pk_admission(
@@ -81,10 +328,11 @@ def run_pk_admission(
     temperatures: list[float] | None = None,
     probe_call_model_fn=call_model,
 ) -> dict:
-    """Admit a case-model pair only when the target answer is not already known.
+    """Admit only when the critical post-cutoff bridge fact is not already known.
 
     Every probe is a fresh one-turn conversation.  Probe responses are logged but
-    never inserted into the later navigation conversation.
+    never inserted into the later navigation conversation. Legacy cases without a
+    factorized contract retain the old composed-answer gate for reproducibility.
     """
     if temperatures is None:
         base = [0.0, 0.2, 0.5, 0.7, 1.0]
@@ -93,21 +341,37 @@ def run_pk_admission(
         raise ValueError("PK temperature schedule must have one value per repeat")
     if any(not 0 <= value <= 2 for value in temperatures):
         raise ValueError("PK temperatures must be between 0 and 2")
+    factorized_probes = _factorized_pk_probes(case)
+    if factorized_probes:
+        return _run_factorized_pk_admission(
+            case=case, probes=factorized_probes, model=model,
+            target_as_of=target_as_of, judge=judge, store=store,
+            repeats=repeats, max_known_rate=max_known_rate,
+            temperatures=temperatures, probe_call_model_fn=probe_call_model_fn,
+        )
     labels: list[str] = []
     deterministic_judgments = 0
     for probe_repeat in range(repeats):
         prompt = _pk_prompt(case, target_as_of, probe_repeat)
         probe_temperature = temperatures[probe_repeat]
-        response = probe_call_model_fn(
-            model, [{"role": "user", "content": prompt}],
-            temperature=probe_temperature,
-        )
-        judgment = judge.judge_answer(
-            _question(case), response,
-            case.get("new_answer_keywords", []),
-            case.get("old_answer_keywords", []),
-            [],
-        )
+        with model_call_context(
+            role="pk_probe", case_id=case["id"], tested_model=model,
+            probe_repeat=probe_repeat,
+        ):
+            response = probe_call_model_fn(
+                model, [{"role": "user", "content": prompt}],
+                temperature=probe_temperature,
+            )
+        with model_call_context(
+            role="pk_answer_judge", case_id=case["id"], tested_model=model,
+            probe_repeat=probe_repeat,
+        ):
+            judgment = judge.judge_answer(
+                _question(case), response,
+                case.get("new_answer_keywords", []),
+                case.get("old_answer_keywords", []),
+                [],
+            )
         labels.append(judgment.decision)
         deterministic = bool(judgment.raw.get("deterministic_gate"))
         deterministic_judgments += int(deterministic)
@@ -237,9 +501,13 @@ def _contract_hash(cases: list[dict], args) -> str:
         "arena_discovery_mode": "offline_cache" if args.offline else "live_api",
         "pk_repeats": args.pk_repeats,
         "pk_temperature_schedule": args.pk_temperature_schedule,
+        "human_review_contract": args.human_review_contract,
         "pk_max_known_rate": args.pk_max_known_rate,
         "temperature": args.temperature,
         "lang": args.lang,
+        "workers": args.workers,
+        "request_interval": args.request_interval,
+        "pk_only": args.pk_only,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -382,11 +650,10 @@ def _semantic_waypoint_metrics(result: dict, case: dict) -> dict:
     """Compare against one generated proof route without making it mandatory.
 
     Hyperlink steps must match the declared entity relation and must really
-    have succeeded in the rendered revision.  Intermediate temporal steps may
-    use any strictly later model-selected date; only the first cutoff and final
-    target dates are fixed by the question contract.  Exact generated
-    revisions remain useful reference evidence, not a secret answer the model
-    has to guess.
+    have succeeded in the rendered revision. The solver may inspect any date in
+    range, but that browsing choice never defines the answer: later relations
+    are anchored to world-event times in the question. Exact generated revisions
+    remain useful reference evidence, not a secret answer the model has to guess.
     """
     waypoints = case.get("temporal_waypoints") or []
     if not waypoints:
@@ -637,8 +904,94 @@ def _capability_metrics(
     }
 
 
-def _failure_mode(capabilities: dict, label: str, stop_reason: str) -> str:
+def _critical_bridge_evidence_metrics(result: dict, case: dict) -> dict:
+    """Prove that every PK-gated bridge was actually visible to the agent.
+
+    Correctly guessing an old tail attribute is not acquisition.  A bridge counts
+    only when the trajectory loaded the exact frozen source revision whose text
+    contains the generator-verified relation evidence.
+    """
+    contract = case.get("prior_knowledge_contract")
+    chain = case.get("reasoning_chain")
+    if not isinstance(contract, dict) or not isinstance(chain, list):
+        return {
+            "critical_bridge_count": 0,
+            "critical_bridges_evidenced": 0,
+            "critical_bridge_evidence_complete": False,
+            "critical_bridge_evidence": [],
+        }
+    probes = contract.get("probes")
+    if not isinstance(probes, list):
+        probes = []
+    primary_ids = contract.get("primary_admission_probe_ids")
+    primary_id_set = (
+        {str(value) for value in primary_ids}
+        if isinstance(primary_ids, list) else None
+    )
+    primary = [
+        probe for probe in probes
+        if isinstance(probe, dict)
+        and probe.get("objective") == "must_be_unknown"
+        and (primary_id_set is None or str(probe.get("id")) in primary_id_set)
+    ]
+
+    def folded(value: Any) -> str:
+        return " ".join(str(value).casefold().split())
+
+    evidence_pages = result.get("evidence_pages")
+    if not isinstance(evidence_pages, list):
+        evidence_pages = []
+    details = []
+    for probe in primary:
+        raw_hop_index = probe.get("hop_index")
+        if isinstance(raw_hop_index, int) and 0 <= raw_hop_index < len(chain):
+            hop_index: int | None = raw_hop_index
+            hop = chain[raw_hop_index]
+        else:
+            hop_index = None
+            hop = {}
+        expected_title = str(hop.get("source_title") or "")
+        expected_revision = hop.get("source_revision_id")
+        expected_evidence = folded(hop.get("evidence") or "")
+        matching_pages = [
+            page for page in evidence_pages
+            if isinstance(page, dict)
+            and str(page.get("title") or "").casefold() == expected_title.casefold()
+            and page.get("revision_id") == expected_revision
+        ]
+        evidenced = bool(
+            hop_index is not None and expected_evidence and any(
+                expected_evidence in folded(page.get("content") or "")
+                for page in matching_pages
+            )
+        )
+        details.append({
+            "probe_id": probe.get("id"),
+            "hop_index": hop_index,
+            "source_title": expected_title,
+            "source_revision_id": expected_revision,
+            "exact_revision_seen": bool(matching_pages),
+            "contract_evidence_visible": evidenced,
+        })
+    evidenced_count = sum(
+        bool(detail["contract_evidence_visible"]) for detail in details
+    )
+    return {
+        "critical_bridge_count": len(details),
+        "critical_bridges_evidenced": evidenced_count,
+        "critical_bridge_evidence_complete": bool(details)
+        and evidenced_count == len(details),
+        "critical_bridge_evidence": details,
+    }
+
+
+def _failure_mode(
+    capabilities: dict, label: str, stop_reason: str,
+    critical_evidence_complete: bool = True,
+) -> str:
     if label == "correct_after":
+        if not critical_evidence_complete:
+            return "correct_without_critical_bridge_evidence"
         return (
             "success_with_target_evidence"
             if capabilities["target_snapshot_evidence_seen"]
@@ -720,6 +1073,8 @@ def run_case(
     temperature: float,
     snapshot_date_range: tuple[str, str] | None = None,
     browse_call_model_fn=None,
+    human_review: dict[str, Any] | None = None,
+    browse_verbose: bool = False,
 ) -> str | None:
     target = configured_pivot(case, backend)
     if not target:
@@ -743,36 +1098,41 @@ def run_case(
     kwargs = {}
     if browse_call_model_fn is not None:
         kwargs["call_model_fn"] = browse_call_model_fn
-    result = run_temporal_browsing(
-        model=model,
-        backend=backend,
-        start_title=start_title,
-        question=_question(case),
-        allowed_as_of=snapshot_dates,
-        max_steps=max_steps,
-        target_title=target_page.title,
-        target_as_of=target_as_of,
-        snapshot_date_range=snapshot_date_range,
-        allowed_version_keys=(
-            set(navigation["allowed_version_keys"])
-            if snapshot_date_range is None else None
-        ),
-        allowed_titles_by_snapshot=(
-            navigation["allowed_titles_by_snapshot"]
-            if snapshot_date_range is None else None
-        ),
-        reveal_target_title=not bool(case.get("hide_pivot_title")),
-        cutoff_reference=case.get("knowledge_cutoff", {}).get("cutoff_date"),
-        semantic_route_contract=(
-            {
-                "relation_hops": case.get("reasoning_hop_count", 0),
-                "temporal_switches": case.get("required_temporal_switches", 0),
-            }
-            if case.get("temporal_waypoints") else None
-        ),
-        temperature=temperature,
-        **kwargs,
-    )
+    with model_call_context(
+        role="temporal_navigation", case_id=case["id"], tested_model=model,
+        repeat=repeat, attempt_id=attempt_id,
+    ):
+        result = run_temporal_browsing(
+            model=model,
+            backend=backend,
+            start_title=start_title,
+            question=_question(case),
+            allowed_as_of=snapshot_dates,
+            max_steps=max_steps,
+            target_title=target_page.title,
+            target_as_of=target_as_of,
+            snapshot_date_range=snapshot_date_range,
+            allowed_version_keys=(
+                set(navigation["allowed_version_keys"])
+                if snapshot_date_range is None else None
+            ),
+            allowed_titles_by_snapshot=(
+                navigation["allowed_titles_by_snapshot"]
+                if snapshot_date_range is None else None
+            ),
+            reveal_target_title=not bool(case.get("hide_pivot_title")),
+            cutoff_reference=case.get("knowledge_cutoff", {}).get("cutoff_date"),
+            semantic_route_contract=(
+                {
+                    "relation_hops": case.get("reasoning_hop_count", 0),
+                    "temporal_switches": case.get("required_temporal_switches", 0),
+                }
+                if case.get("temporal_waypoints") else None
+            ),
+            temperature=temperature,
+            verbose=browse_verbose,
+            **kwargs,
+        )
     metrics = _navigation_metrics(
         result, navigation, start_title,
         strict_arena=snapshot_date_range is None,
@@ -783,6 +1143,7 @@ def run_case(
         cutoff_reference=case.get("knowledge_cutoff", {}).get("cutoff_date"),
         accepted_answers=case.get("new_answer_keywords", []),
     )
+    critical_evidence = _critical_bridge_evidence_metrics(result, case)
     for record in result["trajectory"]:
         store.write(
             slot="temporal_step", case_id=case["id"], model=model, arm="temporal",
@@ -797,6 +1158,7 @@ def run_case(
         reasoning_chain=case.get("reasoning_chain", []),
         relation_families=case.get("relation_families", []),
         selection_metadata=case.get("selection_metadata"),
+        human_review=human_review,
         temporal_waypoints=case.get("temporal_waypoints", []),
         knowledge_cutoff=case.get("knowledge_cutoff"),
         navigation_id=_navigation_id(navigation),
@@ -830,29 +1192,74 @@ def run_case(
         raw_shortest_navigation_steps=metrics["shortest_navigation_steps"],
         **capabilities,
         **semantic_metrics,
+        **critical_evidence,
     )
     if result["stop_reason"] == "error":
         return None
-    judgment = judge.judge_temporal_answer(
-        _question(case), result["final_answer"],
-        case.get("new_answer_keywords", []), case.get("old_answer_keywords", []),
-        result["evidence_pages"], target_snapshot_as_of=target_as_of,
-    )
+    with model_call_context(
+        role="final_answer_judge", case_id=case["id"], tested_model=model,
+        repeat=repeat, attempt_id=attempt_id,
+    ):
+        judgment = judge.judge_temporal_answer(
+            _question(case), result["final_answer"],
+            case.get("new_answer_keywords", []), case.get("old_answer_keywords", []),
+            result["evidence_pages"], target_snapshot_as_of=target_as_of,
+        )
     store.write(
         slot="final_judgment", case_id=case["id"], model=model, arm="temporal",
         attempt_id=attempt_id, repeat=repeat, question=_question(case),
         response=result["final_answer"], judgment=judgment.to_dict(),
         label=judgment.decision, target_snapshot_as_of=target_as_of,
+        acquisition_success=bool(
+            judgment.decision == "correct_after"
+            and critical_evidence["critical_bridge_evidence_complete"]
+        ),
+        critical_bridge_evidence_complete=critical_evidence[
+            "critical_bridge_evidence_complete"
+        ],
+        critical_bridges_evidenced=critical_evidence[
+            "critical_bridges_evidenced"
+        ],
+        critical_bridge_count=critical_evidence["critical_bridge_count"],
         judge_mode=(
             "deterministic_alias" if judgment.raw.get("deterministic_gate")
             else "llm_fallback"
         ),
         failure_mode=_failure_mode(
-            capabilities, judgment.decision, result["stop_reason"]
+            capabilities, judgment.decision, result["stop_reason"],
+            critical_evidence["critical_bridge_evidence_complete"],
         ),
         capabilities=capabilities,
     )
     return attempt_id
+
+
+def _run_temporal_attempt(
+    *, case: dict, model: str, repeat: int, store: JsonlResultStore,
+    snapshot_dates: list[str | None], navigation: dict, start_distance: int,
+    max_steps: int, temperature: float,
+    snapshot_date_range: tuple[str, str] | None, human_review: dict[str, Any],
+    cache_path: str, lang: str, offline: bool,
+    request_interval: float, request_throttle: WikimediaRequestThrottle,
+    judge_model: str, judge_min_confidence: float,
+) -> str | None:
+    """Run one trajectory with worker-local SQLite and judge clients."""
+    backend = WikipediaPageBackend(
+        cache_path=cache_path, lang=lang, offline_only=offline,
+        min_request_interval=request_interval,
+        request_throttle=request_throttle,
+    )
+    try:
+        return run_case(
+            case=case, model=model, repeat=repeat, backend=backend,
+            judge=LLMJudge(judge_model, min_confidence=judge_min_confidence),
+            store=store, snapshot_dates=snapshot_dates, navigation=navigation,
+            start_distance=start_distance, max_steps=max_steps,
+            temperature=temperature, snapshot_date_range=snapshot_date_range,
+            human_review=human_review,
+        )
+    finally:
+        backend.close()
 
 
 def write_scores(result_path: str, output_path: str, contract_hash: str) -> None:
@@ -899,6 +1306,8 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
             "revision_discovery_used": 0, "temporal_explored": 0,
             "hyperlink_navigation_succeeded": 0,
             "target_snapshot_evidence_seen": 0, "answer_submitted": 0,
+            "acquisition_success": 0,
+            "critical_bridge_evidence_complete": 0,
             "failure_modes": {},
         }
         for key in pk_gates
@@ -915,6 +1324,8 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
             "revision_discovery_used": 0, "temporal_explored": 0,
             "hyperlink_navigation_succeeded": 0,
             "target_snapshot_evidence_seen": 0, "answer_submitted": 0,
+            "acquisition_success": 0,
+            "critical_bridge_evidence_complete": 0,
             "failure_modes": {},
         })
         bucket["n"] += 1
@@ -950,6 +1361,10 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
             bool(summary.get("target_snapshot_evidence_seen"))
         )
         bucket["answer_submitted"] += int(bool(summary.get("answer_submitted")))
+        bucket["acquisition_success"] += int(bool(row.get("acquisition_success")))
+        bucket["critical_bridge_evidence_complete"] += int(
+            bool(row.get("critical_bridge_evidence_complete"))
+        )
         failure_mode = str(row.get("failure_mode") or "unclassified")
         failure_modes = bucket["failure_modes"]
         failure_modes[failure_mode] = failure_modes.get(failure_mode, 0) + 1
@@ -966,6 +1381,9 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
     with open(output_path, "w", newline="", encoding="utf-8") as fh:
         fields = [
             "model", "case_id", "pk_admitted", "pk_gate_reason", "pk_probe_n",
+            "pk_contract_version", "pk_critical_bridge_known",
+            "pk_critical_bridge_known_rate_pct", "pk_tail_known_rate_pct",
+            "pk_composed_known_rate_pct", "pk_clean_bridge_composition_candidate",
             "pk_stick_new", "pk_stick_new_rate_pct", "pk_stick_old",
             "pk_stick_old_rate_pct", "pk_other", "n", "correct_after",
             "pk_deterministic_judgments", "pk_llm_fallback_judgments",
@@ -979,7 +1397,9 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
             "mean_semantic_completion_pct",
             "revision_discovery_used", "temporal_explored",
             "hyperlink_navigation_succeeded", "target_snapshot_evidence_seen",
-            "answer_submitted", "failure_modes_json",
+            "answer_submitted", "critical_bridge_evidence_complete",
+            "critical_bridge_evidence_complete_rate_pct", "acquisition_success",
+            "acquisition_success_rate_pct", "failure_modes_json",
             "cycle_detected", "cycle_rate_pct", "found_but_wrong",
         ]
         writer = csv.DictWriter(fh, fieldnames=fields)
@@ -988,11 +1408,29 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
             n = bucket["n"]
             pk_gate = pk_gates.get((model, case_id), {})
             pk_n = int(pk_gate.get("n", 0) or 0)
+
+            def optional_percent(key: str):
+                value = pk_gate.get(key)
+                return "" if value is None else round(100 * float(value), 1)
             writer.writerow({
                 "model": model, "case_id": case_id, "n": n,
                 "pk_admitted": pk_gate.get("passed", ""),
                 "pk_gate_reason": pk_gate.get("reason", "missing_pk_gate"),
                 "pk_probe_n": pk_n,
+                "pk_contract_version": pk_gate.get("pk_contract_version", "legacy"),
+                "pk_critical_bridge_known": pk_gate.get(
+                    "critical_bridge_known_count", ""
+                ),
+                "pk_critical_bridge_known_rate_pct": optional_percent(
+                    "critical_bridge_known_rate"
+                ),
+                "pk_tail_known_rate_pct": optional_percent("tail_known_rate"),
+                "pk_composed_known_rate_pct": optional_percent(
+                    "composed_known_rate"
+                ),
+                "pk_clean_bridge_composition_candidate": pk_gate.get(
+                    "clean_bridge_composition_candidate", ""
+                ),
                 "pk_stick_new": pk_gate.get("stick_new_count", ""),
                 "pk_stick_new_rate_pct": (
                     round(100 * float(pk_gate.get("stick_new_rate", 0)), 1)
@@ -1058,6 +1496,19 @@ def write_scores(result_path: str, output_path: str, contract_hash: str) -> None
                     "target_snapshot_evidence_seen"
                 ],
                 "answer_submitted": bucket["answer_submitted"],
+                "critical_bridge_evidence_complete": bucket[
+                    "critical_bridge_evidence_complete"
+                ],
+                "critical_bridge_evidence_complete_rate_pct": (
+                    round(
+                        100 * bucket["critical_bridge_evidence_complete"] / n, 1
+                    ) if n else ""
+                ),
+                "acquisition_success": bucket["acquisition_success"],
+                "acquisition_success_rate_pct": (
+                    round(100 * bucket["acquisition_success"] / n, 1)
+                    if n else ""
+                ),
                 "failure_modes_json": json.dumps(
                     bucket["failure_modes"], sort_keys=True
                 ),
@@ -1078,6 +1529,14 @@ def main() -> int:
     parser.add_argument("--judge-min-confidence", type=float, default=0.8)
     parser.add_argument("--cases", default="generated_cases.json")
     parser.add_argument("--case-ids")
+    parser.add_argument(
+        "--human-review-file",
+        help="tkg-human-review-v1 approval/waiver artifact bound to exact case hashes",
+    )
+    parser.add_argument(
+        "--waive-human-review", action="store_true",
+        help="explicitly record human_review=waived_by_user for review-required cases",
+    )
     parser.add_argument(
         "--snapshot-dates",
         help=(
@@ -1101,7 +1560,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--pk-repeats", type=int, default=5,
-        help="fresh-context varied-prompt prior-answer probes per case-model pair",
+        help="fresh-context repeats for each factorized PK fact probe",
     )
     parser.add_argument(
         "--pk-temperatures",
@@ -1109,25 +1568,53 @@ def main() -> int:
     )
     parser.add_argument(
         "--pk-max-known-rate", type=float, default=0.0,
-        help="maximum fraction of PK probes allowed to answer with the target value",
+        help="maximum known fraction allowed for each critical-bridge probe",
+    )
+    parser.add_argument(
+        "--pk-only", action="store_true",
+        help=(
+            "run factorized prior-knowledge admission only; do not open the "
+            "Wikipedia backend, construct a graph, or run navigation"
+        ),
     )
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="maximum concurrent temporal trajectories (PK and graph gates stay serial)",
+    )
     parser.add_argument("--lang", default="en")
     parser.add_argument("--cache-path", default="wikipedia_snapshot.db")
+    parser.add_argument(
+        "--request-interval", type=float, default=0.1,
+        help="aggregate minimum seconds between Wikimedia API calls across workers",
+    )
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--output", default="temporal_results.jsonl")
     parser.add_argument("--score-output", default="temporal_scores.csv")
+    parser.add_argument(
+        "--usage-output",
+        help="append-only model call/cache/token/cost JSONL; default <output>.usage.jsonl",
+    )
     args = parser.parse_args()
+    args.usage_output = args.usage_output or f"{args.output}.usage.jsonl"
 
     assert_new_output_path(args.output)
     assert_new_output_path(args.score_output)
-    if args.repeats <= 0 or args.max_steps <= 0 or args.pk_repeats <= 0:
-        parser.error("--repeats, --max-steps, and --pk-repeats must be > 0")
-    if min(args.start_distance, args.backlink_branch_cap, args.arena_node_cap) <= 0:
+    if args.pk_repeats <= 0:
+        parser.error("--pk-repeats must be > 0")
+    if not args.pk_only and (args.repeats <= 0 or args.max_steps <= 0):
+        parser.error("--repeats and --max-steps must be > 0")
+    if args.workers <= 0:
+        parser.error("--workers must be > 0")
+    if args.request_interval < 0:
+        parser.error("--request-interval must be >= 0")
+    if not args.pk_only and min(
+        args.start_distance, args.backlink_branch_cap, args.arena_node_cap
+    ) <= 0:
         parser.error(
             "--start-distance, --backlink-branch-cap, and --arena-node-cap must be > 0"
         )
-    if args.max_steps < args.start_distance + 1:
+    if not args.pk_only and args.max_steps < args.start_distance + 1:
         parser.error(
             "--max-steps must allow the shortest navigation path and answer submission"
         )
@@ -1170,16 +1657,21 @@ def main() -> int:
     if errors:
         print("\n".join(f"[config error] {error}" for error in errors), file=sys.stderr)
         return 2
-    required_max_steps = max(
-        (int(case.get("expected_navigation_distance", args.start_distance)) + 1
-         for case in cases),
-        default=args.start_distance + 1,
-    )
-    if args.max_steps < required_max_steps:
-        parser.error(
-            f"--max-steps must be >= {required_max_steps} for the deepest declared "
-            "reasoning chain and answer submission"
+    # Review is intentionally resolved per case only after PK admission below.
+    # Its own artifact is bound to the case hash; it cannot affect the upstream
+    # PK contract or force review work for rejected candidates.
+    args.human_review_contract = []
+    if not args.pk_only:
+        required_max_steps = max(
+            (int(case.get("expected_navigation_distance", args.start_distance)) + 1
+             for case in cases),
+            default=args.start_distance + 1,
         )
+        if args.max_steps < required_max_steps:
+            parser.error(
+                f"--max-steps must be >= {required_max_steps} for the deepest "
+                "declared reasoning chain and answer submission"
+            )
     # Validate all per-case date sets before opening the append-only result file.
     dates_by_case = {
         case["id"]: _snapshot_values(args.snapshot_dates, case) for case in cases
@@ -1191,16 +1683,31 @@ def main() -> int:
     contract_hash = _contract_hash(cases, args)
     completed = _completed(args.output, contract_hash)
     recorded_navigation_ids = _recorded_navigation_ids(args.output, contract_hash)
-    backend = WikipediaPageBackend(
-        cache_path=args.cache_path, lang=args.lang, offline_only=args.offline
+    request_throttle = WikimediaRequestThrottle(args.request_interval)
+    backend = None
+    if not args.pk_only:
+        backend = WikipediaPageBackend(
+            cache_path=args.cache_path, lang=args.lang, offline_only=args.offline,
+            min_request_interval=args.request_interval,
+            request_throttle=request_throttle,
+        )
+    experiment_name = (
+        "factorized_prior_knowledge_admission"
+        if args.pk_only else "pk_admitted_temporal_multipath_navigation"
     )
     judge = LLMJudge(args.judge_model, min_confidence=args.judge_min_confidence)
     store = JsonlResultStore(args.output, metadata={
         "contract_hash": contract_hash,
         "judge_model": args.judge_model,
-        "experiment": "pk_admitted_temporal_shortest_path_navigation",
+        "experiment": experiment_name,
         "schema_version": CONTRACT_SCHEMA,
+        "human_review_contract": args.human_review_contract,
     })
+    usage_ledger = UsageLedger(args.usage_output, metadata={
+        "contract_hash": contract_hash,
+        "experiment": experiment_name,
+    })
+    set_usage_ledger(usage_ledger)
     try:
         for case in cases:
             _, configured_after = _case_endpoints(case)
@@ -1220,8 +1727,78 @@ def main() -> int:
             if not compatible_models:
                 print(f"[skip] {case['id']}: no model matches its cutoff contract")
                 continue
-            # Build and validate the graph contract before any paid PK/judge calls.
-            # A disconnected or non-shortest relation chain is not a valid question.
+            admitted_models = []
+            for model in compatible_models:
+                cached_gate = JsonlResultStore.latest_pk_gate(
+                    args.output, case["id"], model, contract_hash,
+                )
+                if cached_gate is None:
+                    try:
+                        gate = run_pk_admission(
+                            case=case, model=model, target_as_of=target_as_of,
+                            judge=judge, store=store, repeats=args.pk_repeats,
+                            max_known_rate=args.pk_max_known_rate,
+                            temperatures=args.pk_temperature_schedule,
+                        )
+                        admitted = bool(gate["passed"])
+                        if gate.get("pk_contract_version"):
+                            print(
+                                f"[PK {'pass' if admitted else 'reject'}] "
+                                f"{case['id']}/{model}: "
+                                f"critical_bridge_known="
+                                f"{gate['critical_bridge_known_count']}/{gate['n']} "
+                                f"tail_known_rate={gate['tail_known_rate']} "
+                                f"composed_known_rate={gate['composed_known_rate']} "
+                                f"reason={gate['reason']}"
+                            )
+                        else:
+                            print(
+                                f"[PK {'pass' if admitted else 'reject'}] "
+                                f"{case['id']}/{model}: "
+                                f"legacy_new={gate['stick_new_count']}/{gate['n']} "
+                                f"legacy_old={gate['stick_old_count']}/{gate['n']} "
+                                f"reason={gate['reason']}"
+                            )
+                    except (OpenRouterError, ValueError) as exc:
+                        print(f"[error] PK admission {case['id']}/{model}: {exc}")
+                        admitted = False
+                else:
+                    admitted = cached_gate
+                    print(
+                        f"[PK checkpoint] {case['id']}/{model}: "
+                        f"{'admitted' if admitted else 'rejected'}"
+                    )
+                if admitted:
+                    admitted_models.append(model)
+                else:
+                    print(f"[PK reject] {case['id']}/{model}: unknown-knowledge gate failed")
+            if not admitted_models:
+                print(f"[skip] {case['id']}: no model passed PK admission")
+                continue
+            if args.pk_only:
+                print(
+                    f"[PK-only complete] {case['id']}: "
+                    f"admitted_models={len(admitted_models)}"
+                )
+                continue
+
+            try:
+                review = resolve_human_reviews(
+                    [case], review_file=args.human_review_file,
+                    waive_human_review=args.waive_human_review,
+                )[case["id"]]
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                parser.error(
+                    f"{case['id']}: PK admitted but review is unavailable: {exc}"
+                )
+            store.write(
+                slot="human_review_admission", case_id=case["id"],
+                model="__shared__", arm="admission", human_review=review,
+            )
+
+            # Graph construction is intentionally downstream of PK admission. A
+            # true PK-only run never opens Wikimedia or pays this graph cost.
+            assert backend is not None
             target = configured_pivot(case, backend)
             if not target:
                 print(f"[error] {case['id']}: no Wikipedia pivot title")
@@ -1245,42 +1822,6 @@ def main() -> int:
                     )
             except (WikipediaError, ValueError) as exc:
                 print(f"[error] {case['id']}: navigation graph unavailable: {exc}")
-                continue
-            admitted_models = []
-            for model in compatible_models:
-                cached_gate = JsonlResultStore.latest_pk_gate(
-                    args.output, case["id"], model, contract_hash,
-                )
-                if cached_gate is None:
-                    try:
-                        gate = run_pk_admission(
-                            case=case, model=model, target_as_of=target_as_of,
-                            judge=judge, store=store, repeats=args.pk_repeats,
-                            max_known_rate=args.pk_max_known_rate,
-                            temperatures=args.pk_temperature_schedule,
-                        )
-                        admitted = bool(gate["passed"])
-                        print(
-                            f"[PK {'pass' if admitted else 'reject'}] "
-                            f"{case['id']}/{model}: new={gate['stick_new_count']}/"
-                            f"{gate['n']} old={gate['stick_old_count']}/{gate['n']} "
-                            f"reason={gate['reason']}"
-                        )
-                    except (OpenRouterError, ValueError) as exc:
-                        print(f"[error] PK admission {case['id']}/{model}: {exc}")
-                        admitted = False
-                else:
-                    admitted = cached_gate
-                    print(
-                        f"[PK checkpoint] {case['id']}/{model}: "
-                        f"{'admitted' if admitted else 'rejected'}"
-                    )
-                if admitted:
-                    admitted_models.append(model)
-                else:
-                    print(f"[PK reject] {case['id']}/{model}: unknown-knowledge gate failed")
-            if not admitted_models:
-                print(f"[skip] {case['id']}: no model passed PK admission")
                 continue
             snapshot_range = ranges_by_case[case["id"]]
             navigation_id = _navigation_id(navigation)
@@ -1313,34 +1854,56 @@ def main() -> int:
                     reference_only=snapshot_range is not None,
                 )
                 recorded_navigation_ids.add(navigation_id)
+            pending = []
             for model in admitted_models:
                 for repeat in range(args.repeats):
                     checkpoint = (case["id"], model, repeat)
                     if completed.get(checkpoint) == navigation_id:
                         print(f"[checkpoint] skip {checkpoint}")
-                        continue
+                    else:
+                        pending.append((checkpoint, model, repeat))
+            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                futures = {
+                    executor.submit(
+                        _run_temporal_attempt,
+                        case=case, model=model, repeat=repeat, store=store,
+                        snapshot_dates=dates_by_case[case["id"]],
+                        navigation=navigation, start_distance=args.start_distance,
+                        max_steps=args.max_steps, temperature=args.temperature,
+                        snapshot_date_range=snapshot_range,
+                        human_review=review,
+                        cache_path=args.cache_path, lang=args.lang,
+                        offline=args.offline, request_interval=args.request_interval,
+                        request_throttle=request_throttle,
+                        judge_model=args.judge_model,
+                        judge_min_confidence=args.judge_min_confidence,
+                    ): checkpoint
+                    for checkpoint, model, repeat in pending
+                }
+                for future in as_completed(futures):
+                    checkpoint = futures[future]
                     try:
-                        attempt_id = run_case(
-                            case=case, model=model, repeat=repeat, backend=backend,
-                            judge=judge, store=store,
-                            snapshot_dates=dates_by_case[case["id"]],
-                            navigation=navigation,
-                            start_distance=args.start_distance,
-                            max_steps=args.max_steps, temperature=args.temperature,
-                            snapshot_date_range=snapshot_range,
-                        )
-                    except (WikipediaError, ValueError) as exc:
+                        attempt_id = future.result()
+                    except (OpenRouterError, WikipediaError, ValueError) as exc:
                         print(f"[error] {checkpoint}: {exc}")
                         attempt_id = None
                     if attempt_id:
+                        _, model, repeat = checkpoint
                         store.write(
                             slot="checkpoint", case_id=case["id"], model=model,
                             arm="temporal", repeat=repeat, status="complete",
                             attempt_id=attempt_id, navigation_id=navigation_id,
                         )
+                        print(
+                            f"[trajectory stored] {case['id']}/{model}/repeat={repeat} "
+                            f"attempt={attempt_id}"
+                        )
     finally:
+        set_usage_ledger(None)
+        usage_ledger.close()
         store.close()
-        backend.close()
+        if backend is not None:
+            backend.close()
     write_scores(args.output, args.score_output, contract_hash)
     print(f"Done: {args.output}; scores: {args.score_output}")
     return 0

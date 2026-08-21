@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "tkg-visualization-v4"
+SCHEMA_VERSION = "tkg-visualization-v5"
 CURRENT_GROUP = "__CURRENT_SNAPSHOT__"
 
 
@@ -523,8 +523,25 @@ def _temporal_trajectory(
     judgments = [row for row in group_rows if row.get("slot") == "final_judgment"]
     judgment = max(judgments, key=lambda row: row.get("_line_number", 0)) if judgments else None
     label = judgment.get("label") if judgment else "missing_final_judgment"
+    reasoning_chain = summary.get("reasoning_chain", [])
+    if not isinstance(reasoning_chain, list):
+        reasoning_chain = []
+    final_hop = reasoning_chain[-1] if reasoning_chain else {}
+    expected_answer_aliases = (
+        final_hop.get("target_aliases", []) if isinstance(final_hop, dict) else []
+    )
+    if not isinstance(expected_answer_aliases, list):
+        expected_answer_aliases = []
+    judgment_payload = judgment.get("judgment", {}) if judgment else {}
+    if not isinstance(judgment_payload, dict):
+        judgment_payload = {}
     pk_required = str(summary.get("schema_version", "")).startswith("temporal-pk-")
     pk_ok = bool(pk_gate.get("passed")) if pk_gate else not pk_required
+    pivot_hit = bool(summary.get("pivot_hit"))
+    target_evidence = bool(summary.get("target_snapshot_evidence_seen"))
+    alternate_path_success = bool(
+        label == "correct_after" and target_evidence and not pivot_hit
+    )
     return {
         "id": str(summary.get("attempt_id") or summary.get("trajectory_key")),
         "trajectory_key": summary.get("trajectory_key"),
@@ -535,8 +552,17 @@ def _temporal_trajectory(
         "arm": "temporal",
         "start_distance": summary.get("start_distance"),
         "start_title": summary.get("start_title"),
+        "question": summary.get("question"),
+        "expected_answer_aliases": expected_answer_aliases,
+        "model_answer": (
+            summary.get("final_answer")
+            or (judgment.get("response") if judgment else None)
+            or ""
+        ),
+        "judgment_label": label,
+        "judgment_reason": judgment_payload.get("reason"),
         "reasoning_hop_count": summary.get("reasoning_hop_count"),
-        "reasoning_chain": summary.get("reasoning_chain", []),
+        "reasoning_chain": reasoning_chain,
         "relation_families": summary.get("relation_families", []),
         "selection_metadata": summary.get("selection_metadata"),
         "temporal_waypoints": summary.get("temporal_waypoints", []),
@@ -553,7 +579,12 @@ def _temporal_trajectory(
         "initial_node_id": initial_node_id,
         "pivot_source": "temporal_summary.target_title",
         "snapshot_as_of": None,
-        "page_hit": bool(summary.get("pivot_hit")),
+        "page_hit": pivot_hit,
+        "alternate_path_success": alternate_path_success,
+        "proof_path_kind": (
+            "alternate_target_evidence" if alternate_path_success
+            else "pivot" if pivot_hit else "incomplete"
+        ),
         "stop_reason": summary.get("stop_reason"),
         "completed": bool(checkpoint and checkpoint.get("status") == "complete"),
         "eligible": bool(judgment and pk_ok),
@@ -597,8 +628,17 @@ def _temporal_trajectory(
         "revision_discovery_successes": summary.get("revision_discovery_successes", 0),
         "temporal_switch_successes": summary.get("temporal_switch_successes", 0),
         "hyperlink_follow_successes": summary.get("hyperlink_follow_successes", 0),
-        "target_snapshot_evidence_seen": bool(
-            summary.get("target_snapshot_evidence_seen")
+        "target_snapshot_evidence_seen": target_evidence,
+        "critical_bridge_count": summary.get("critical_bridge_count", 0),
+        "critical_bridges_evidenced": summary.get(
+            "critical_bridges_evidenced", 0
+        ),
+        "critical_bridge_evidence_complete": bool(
+            judgment.get("critical_bridge_evidence_complete")
+            if judgment else summary.get("critical_bridge_evidence_complete")
+        ),
+        "acquisition_success": bool(
+            judgment.get("acquisition_success") if judgment else False
         ),
         "answer_submitted": bool(summary.get("answer_submitted")),
         "tool_error_count": summary.get("tool_error_count", 0),

@@ -1,0 +1,135 @@
+{
+  "schema_version": "open-world-temporal-live-runner-freeze-v2.3",
+  "frozen_at": "2026-08-16",
+  "status": "joint_runner_engineering_contract_frozen",
+  "legacy_v2_2": {
+    "manifest": "docs/OPEN_WORLD_LIVE_RUNNER_V2_2_FREEZE_2026-08-16.json",
+    "manifest_sha256": "af7151ad90ff1e8e2fcb9d4156c103b0b945906c9faedbb669f4f641bb2c2c2e",
+    "api_failure_artifact": "examples/temporal_eval_v2/live_synthetic_api_gpt54mini_v22.json",
+    "api_failure_artifact_sha256": "091b2e89ec6ffc2cb46068c12270225edf76ae04175051c706031184905a46fa",
+    "modified": false
+  },
+  "controller": {
+    "protocol": "joint_rank_submit_v2.3",
+    "implementation": "API LLM external controller over program-enumerated graph actions",
+    "model_calls_per_unfinished_state": 1,
+    "maximum_calls_with_contract_retry": 2,
+    "standalone_submission_proposer_used": false,
+    "fixed_submit_slot": "submit_slot:v1",
+    "prompt_source_sha256": "8c6c878b50f453e0d3363731ee9705c5f11f02cf8de858904b0b70e5eba64b8c",
+    "response_schema": "joint-rank-submit-response-v2.3",
+    "response_schema_sha256": "e6c42512ae6e7abe8d2d9a8eb6a87ed40aaaba60a6eaeb17ebdb2347d3cdc12e"
+  },
+  "inference_boundary": {
+    "allowed": [
+      "public question",
+      "cutoff and target dates",
+      "current page revision and snapshot",
+      "visible trajectory evidence",
+      "reasoning summary and extracted entities",
+      "public action IDs and descriptions",
+      "search budget and deterministic seed"
+    ],
+    "forbidden": [
+      "accepted final aliases",
+      "private claims and witnesses",
+      "reference routes or actions",
+      "expected pages or revisions",
+      "distance-to-gold",
+      "Wikidata QIDs",
+      "correctness signals",
+      "post-hoc evaluator output"
+    ],
+    "recursive_no_gold_assertion": true,
+    "private_evaluation_timing": "only after search returns"
+  },
+  "compaction": {
+    "policy": "retrieval_order_transitions_reserving_pagination_and_submit_slot_v2.3",
+    "source_sha256": "551049088325ba892f4c9c3ac814d01e261e33f1c0fec64c315c69e280781c3d",
+    "dense_action_limit": 30,
+    "submit_slot_always_retained": true,
+    "necessary_pagination_controls_retained": true,
+    "gold_features": false
+  },
+  "ranking_contract": {
+    "returned_ids_equal_compacted_ids": true,
+    "unique_ids": true,
+    "finite_utility_range": [-100, 100],
+    "retry_count": 1,
+    "invalid_after_retry": "branch_fail_closed",
+    "missing_action_floor": false
+  },
+  "submission_contract": {
+    "statuses": [
+      "valid",
+      "abstained",
+      "invalid_schema",
+      "invalid_evidence_ownership",
+      "invalid_literal_support",
+      "invalid_claim_fields",
+      "invalid_event_time_format"
+    ],
+    "public_gate_source_sha256": "bc9e2a56114468a4f25e2c69e5b3f36855f7883baa640f430a66e4a17072b4ad",
+    "null_or_invalid_submit_consumes_expansion": false,
+    "null_or_invalid_submit_discards_graph_scores": false,
+    "private_correctness_controls_instantiation": false,
+    "valid_submit_action_score": "normalized utility assigned to submit_slot:v1"
+  },
+  "search_budget": {
+    "link_page_size": 50,
+    "revision_page_size": 50,
+    "max_environment_queries_per_node": 4,
+    "default_max_expansions": 40,
+    "default_max_actions_per_state": 4,
+    "beam_widths_for_future_comparison": [1, 3, 5],
+    "hard_expansion_stop": true,
+    "score_recomputable_from_trace": true
+  },
+  "fresh_submission_decision_gate": {
+    "required_states": 40,
+    "positive_states": 20,
+    "negative_states": 20,
+    "thresholds": {
+      "positive_valid_submission_recall_min": 0.9,
+      "negative_false_submit_rate_max": 0.05,
+      "dense_ranking_contract_pass_rate": 1.0,
+      "evidence_ownership_pass_rate": 1.0,
+      "gold_leakage": 0
+    },
+    "old_v2_2_synthetic_failure_allowed_as_gate_state": false,
+    "prompt_tuning_on_gate_states_after_result": false
+  },
+  "post_freeze_api_smoke_configuration": {
+    "model": "openai/gpt-5.4-mini",
+    "temperature": 0.0,
+    "beam_width": 1,
+    "max_actions_per_state": 1,
+    "max_expansions": 16,
+    "seed": 23,
+    "interpretation": "engineering smoke only"
+  },
+  "frozen_files": {
+    "src/tkg/experiment/joint_controller_v23.py": "064829f005e4f8a654b4142b78a92c3d7ddc66eeade3622c4f39ca97d7acdaae",
+    "src/tkg/experiment/temporal_live_runner_v23.py": "4509925d730ea2fa58b2764868d5ccbdfe7bb506ba77deb58b5978dccb1b76b8",
+    "src/tkg/experiment/temporal_live_v23_synthetic.py": "6e8bc2e0ebffcfa222566340069bb86b844779431cd09c6c8b2bd2acdbddef7a",
+    "tests/test_joint_controller_v23.py": "20569453b78fd5627fcb32bfab091156167c97428bce707e5d5614f97dad4540",
+    "tests/test_temporal_live_runner_v23.py": "e2c9c0eca7c91a73ed3d5df7e2173a2c8ab2d5234fbd9e9b959631cbb65cafc5",
+    "examples/temporal_eval_v23/synthetic_joint_case_v23.json": "4392437a415d15aab123d59b8837e1b2406ecbe251996ce82e3e8d16940cdffa",
+    "examples/temporal_eval_v23/deterministic_joint_multiroute_v23_1.json": "9238904db59bf33afb61799c84bd4719e04138fcbfe196c56e7a2e774a11127d",
+    "docs/JOINT_RANK_SUBMIT_V2_3_PHASE0_AUDIT.md": "19ea7769af75af901d5ccf8fca85b63df353796ea16847cbc1759d61fc13d6fe",
+    "src/tkg/experiment/temporal_evaluation_v2.py": "5b5335dc3b721fe522c9b7c5dabb7ab2ac19cc813559ddc51ddf60ac8fdd0389"
+  },
+  "deterministic_engineering_result": {
+    "end_to_end_success": true,
+    "reference_route_recalled": false,
+    "alternative_valid_route_found": true,
+    "new_tests_passed": 20,
+    "full_tests_passed": 220
+  },
+  "research_boundary": {
+    "graph_integrated_decoding": false,
+    "open_weight_conditional_logprob_run": false,
+    "benchmark_accuracy": false,
+    "method_superiority_claim_allowed": false
+  }
+}

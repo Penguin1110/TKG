@@ -112,8 +112,34 @@ function refreshTrajectoryOptions() {
     const label = `${t.model} · ${t.case_id} · ${t.arm} · ${snapshot} · d${t.start_distance ?? "?"} · r${t.repeat ?? 0} · ${flags}`;
     select.add(new Option(label, t.id));
   });
-  if ([...select.options].some(o => o.value === prior)) select.value = prior;
-  else selectTrajectory("");
+  if ([...select.options].some(o => o.value === prior) && prior) {
+    select.value = prior;
+  } else if (options.length) {
+    select.value = options[0].id;
+    selectTrajectory(options[0].id);
+  } else selectTrajectory("");
+}
+
+function updateDiagnosis() {
+  const t = state.trajectory;
+  $("empty-diagnosis").hidden = !!t;
+  $("run-diagnosis").hidden = !t;
+  if (!t) return;
+  $("diagnosis-question").textContent = t.question || "Question text was not recorded.";
+  $("diagnosis-expected").textContent = t.expected_answer_aliases?.length
+    ? t.expected_answer_aliases.join(" / ") : "Not recorded";
+  $("diagnosis-model-answer").textContent = t.model_answer || "No answer submitted";
+  const route = $("diagnosis-route"); route.replaceChildren();
+  (t.reasoning_chain || []).forEach((hop, index) => {
+    const item = document.createElement("li");
+    item.textContent = `${index === 0 ? `${hop.source_title} → ` : ""}${hop.target_title} @ ${hop.as_of} · ${hop.relation}`;
+    route.append(item);
+  });
+  const completed = `${t.semantic_waypoints_completed ?? 0}/${t.semantic_waypoint_count ?? "?"} semantic waypoints`;
+  const ending = t.final_title ? ` Ended at ${t.final_title}.` : "";
+  const errors = t.tool_error_count ? ` ${t.tool_error_count} tool errors.` : "";
+  const reason = t.judgment_reason ? ` ${t.judgment_reason}` : "";
+  $("diagnosis-failure").textContent = `${t.failure_mode || t.outcome_reason || t.stop_reason || "Unknown outcome"}: ${completed}.${ending}${errors}${reason}`;
 }
 
 function refreshVisibility() {
@@ -186,7 +212,10 @@ function selectTrajectory(id) {
       [state.trajectory.snapshot_mode === "agent_selected_range"
         ? `model time ${state.trajectory.snapshot_range?.start ?? "?"}…${state.trajectory.snapshot_range?.end ?? "?"}`
         : "fixed time list", state.trajectory.snapshot_mode === "agent_selected_range"],
-      [state.trajectory.page_hit ? "pivot hit" : "pivot miss", state.trajectory.page_hit],
+      [state.trajectory.alternate_path_success
+        ? "alternate legal proof path"
+        : (state.trajectory.page_hit ? "pivot hit" : "pivot miss"),
+        state.trajectory.alternate_path_success || state.trajectory.page_hit],
       [state.trajectory.revision_discovery_attempts
         ? `revision dates ${state.trajectory.revision_discovery_successes}/${state.trajectory.revision_discovery_attempts}`
         : "revision dates unused", state.trajectory.revision_discovery_successes > 0],
@@ -199,6 +228,13 @@ function selectTrajectory(id) {
       [state.trajectory.target_snapshot_evidence_seen
         ? "target evidence seen" : "target evidence missing",
         state.trajectory.target_snapshot_evidence_seen],
+      [state.trajectory.critical_bridge_count
+        ? `critical bridges ${state.trajectory.critical_bridges_evidenced}/${state.trajectory.critical_bridge_count}`
+        : "critical bridge evidence n/a",
+        state.trajectory.critical_bridge_evidence_complete],
+      [state.trajectory.acquisition_success
+        ? "acquisition success" : "acquisition not established",
+        state.trajectory.acquisition_success],
       [state.trajectory.semantic_waypoint_count
         ? `reference route ${state.trajectory.semantic_waypoints_completed ?? 0}/${state.trajectory.semantic_waypoint_count}`
         : "reference route n/a", state.trajectory.reference_route_match === true],
@@ -208,7 +244,8 @@ function selectTrajectory(id) {
         state.trajectory.snapshot_mode === "agent_selected_range"
           ? state.trajectory.outside_reference_arena_count === 0 : state.trajectory.shortest_arrival],
       [state.trajectory.cycle_detected ? `cycle/revisit ${state.trajectory.revisit_count}` : "no revisit", !state.trajectory.cycle_detected],
-      [state.trajectory.failure_mode || state.trajectory.outcome_stage || "temporal answer", false],
+      [state.trajectory.failure_mode || state.trajectory.outcome_stage || "temporal answer",
+        state.trajectory.outcome_reason === "correct_after"],
       [state.trajectory.outcome_reason || "unclassified", state.trajectory.outcome_reason === "correct_after"]
     ] : [
       [state.trajectory.completed ? "complete" : "partial", state.trajectory.completed],
@@ -230,7 +267,7 @@ function selectTrajectory(id) {
       }
     }
   }
-  refreshVisibility(); updateTimeline();
+  updateDiagnosis(); refreshVisibility(); updateTimeline();
 }
 
 function currentNodeId() {

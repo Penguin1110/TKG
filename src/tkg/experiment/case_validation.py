@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from datetime import datetime
 
 from tkg.wikipedia.snapshot import page_version_key
+from tkg.experiment.event_order import event_order_certificate_errors
+
+
+def _canonical_sha256(value) -> str:
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
 
 
 def validate_chain_route(
@@ -113,6 +121,18 @@ def validate_case(case: dict, *, allow_legacy: bool = False) -> list[str]:
     if not case.get("old_answer_keywords") and not is_multihop:
         errors.append(f"{prefix}: empty old_answer_keywords")
     if is_multihop:
+        question = str(case.get("temporal_question") or "")
+        if re.search(
+            r"\b(?:snapshot\s+(?:that\s+was\s+)?"
+            r"(?:used|selected|chosen|viewed|loaded|inspected|opened)\s+"
+            r"(?:in|during|at|for)\s+(?:the\s+)?previous step|"
+            r"(?:the\s+)?previous[- ]step(?:'s|\s+)(?:used\s+)?snapshot|"
+            r"snapshot\s+(?:from|of)\s+(?:the\s+)?previous step)\b",
+            question.casefold(),
+        ):
+            errors.append(
+                f"{prefix}: answer depends on a solver-selected previous snapshot"
+            )
         chain = case.get("reasoning_chain")
         if not isinstance(chain, list) or len(chain) < 2:
             errors.append(f"{prefix}: reasoning_chain must contain at least two hops")
@@ -215,6 +235,165 @@ def validate_case(case: dict, *, allow_legacy: bool = False) -> list[str]:
         if not isinstance(required_dates, list) or len(required_dates) < 2:
             errors.append(f"{prefix}: multi-hop case needs at least two snapshot dates")
         generation = case.get("_generation", {})
+        if generation.get("schema_version") == "wikipedia-cutoff-relative-multihop-v5":
+            errors.append(
+                f"{prefix}: generation v5 is invalidated; regenerate under v6 "
+                "with event-order and frozen-evidence contracts"
+            )
+            contract = case.get("prior_knowledge_contract")
+            if not isinstance(contract, dict) or contract.get(
+                "schema_version"
+            ) != "factorized-prior-knowledge-v1":
+                errors.append(
+                    f"{prefix}: v5 generation requires factorized prior knowledge"
+                )
+            elif not any(
+                isinstance(probe, dict)
+                and probe.get("role") == contract.get("primary_admission_role")
+                and probe.get("objective") == "must_be_unknown"
+                for probe in contract.get("probes", [])
+            ):
+                errors.append(
+                    f"{prefix}: factorized prior knowledge lacks a critical bridge"
+                )
+        if generation.get("schema_version") == "wikipedia-cutoff-relative-multihop-v6":
+            contract = case.get("prior_knowledge_contract")
+            if not isinstance(contract, dict) or contract.get(
+                "schema_version"
+            ) != "factorized-prior-knowledge-v2":
+                errors.append(
+                    f"{prefix}: v6 generation requires factorized prior knowledge v2"
+                )
+            else:
+                probes = contract.get("probes", [])
+                primary_ids = contract.get("primary_admission_probe_ids")
+                objective_ids = {
+                    str(probe.get("id")) for probe in probes
+                    if isinstance(probe, dict)
+                    and probe.get("objective") == "must_be_unknown"
+                }
+                if (
+                    not isinstance(primary_ids, list) or not primary_ids
+                    or set(map(str, primary_ids)) != objective_ids
+                ):
+                    errors.append(
+                        f"{prefix}: v2 PK primary IDs do not match acquisition edges"
+                    )
+            for index, hop in enumerate(chain):
+                for field in (
+                    "source_content_sha256", "source_links_sha256",
+                    "target_content_sha256", "target_links_sha256",
+                ):
+                    if not re.fullmatch(r"[0-9a-f]{64}", str(hop.get(field, ""))):
+                        errors.append(f"{prefix}: hop {index} missing valid {field}")
+                structured = hop.get("structured_evidence")
+                claims_first_or_next = bool(
+                    re.search(
+                        r"\b(?:first|next)\b",
+                        str(hop.get("relative_clause", "")), re.IGNORECASE,
+                    )
+                    or (
+                        isinstance(structured, dict)
+                        and structured.get("temporal_operator")
+                        == "next_after_boundary"
+                    )
+                )
+                if (
+                    index > 0
+                    and hop.get("incoming_time_policy") == "advance_required"
+                    and isinstance(structured, dict)
+                    and structured.get("source") == "wikidata_time_qualified_statement"
+                    and claims_first_or_next
+                ):
+                    previous = chain[index - 1]
+                    previous_structured = previous.get("structured_evidence")
+                    boundary = (
+                        previous_structured.get("event_date")
+                        if isinstance(previous_structured, dict)
+                        and previous_structured.get("event_date")
+                        else previous.get("as_of")
+                    )
+                    selected_qid = (
+                        structured.get("kg_subject_qid")
+                        if structured.get("direction") == "inverse"
+                        else structured.get("kg_object_qid")
+                    )
+                    for error in event_order_certificate_errors(
+                        structured.get("event_order_certificate"),
+                        expected_boundary=str(boundary),
+                        expected_event_date=str(structured.get("event_date")),
+                        expected_target_qid=(
+                            str(selected_qid) if selected_qid else None
+                        ),
+                    ):
+                        errors.append(f"{prefix}: hop {index} {error}")
+
+            frozen = case.get("frozen_wikipedia_evidence")
+            if not isinstance(frozen, dict) or frozen.get(
+                "schema_version"
+            ) != "frozen-wikipedia-evidence-v1":
+                errors.append(f"{prefix}: missing frozen Wikipedia evidence")
+            else:
+                frozen_pages = frozen.get("pages")
+                if not isinstance(frozen_pages, list) or not frozen_pages:
+                    errors.append(f"{prefix}: frozen Wikipedia evidence has no pages")
+                    frozen_pages = []
+                frozen_index = {}
+                page_hashes = []
+                for page_index, page in enumerate(frozen_pages):
+                    if not isinstance(page, dict):
+                        errors.append(
+                            f"{prefix}: frozen evidence page {page_index} is invalid"
+                        )
+                        continue
+                    content_hash = hashlib.sha256(
+                        str(page.get("content", "")).encode("utf-8")
+                    ).hexdigest()
+                    links_hash = _canonical_sha256(page.get("links"))
+                    snapshot_payload = {
+                        key: value for key, value in page.items()
+                        if key != "snapshot_sha256"
+                    }
+                    snapshot_hash = _canonical_sha256(snapshot_payload)
+                    if page.get("content_sha256") != content_hash:
+                        errors.append(
+                            f"{prefix}: frozen page {page_index} content hash mismatch"
+                        )
+                    if page.get("links_sha256") != links_hash:
+                        errors.append(
+                            f"{prefix}: frozen page {page_index} link hash mismatch"
+                        )
+                    if page.get("snapshot_sha256") != snapshot_hash:
+                        errors.append(
+                            f"{prefix}: frozen page {page_index} snapshot hash mismatch"
+                        )
+                    page_hashes.append(page.get("snapshot_sha256"))
+                    frozen_index[(
+                        str(page.get("title", "")).casefold(),
+                        page.get("revision_id"),
+                    )] = page
+                manifest_hash = _canonical_sha256({
+                    "schema_version": "frozen-wikipedia-evidence-v1",
+                    "page_hashes": page_hashes,
+                })
+                if frozen.get("manifest_sha256") != manifest_hash:
+                    errors.append(f"{prefix}: frozen evidence manifest hash mismatch")
+                for index, hop in enumerate(chain):
+                    for role in ("source", "target"):
+                        page = frozen_index.get((
+                            str(hop.get(f"{role}_title", "")).casefold(),
+                            hop.get(f"{role}_revision_id"),
+                        ))
+                        if page is None:
+                            errors.append(
+                                f"{prefix}: hop {index} {role} revision is not frozen"
+                            )
+                        elif page.get("content_sha256") != hop.get(
+                            f"{role}_content_sha256"
+                        ):
+                            errors.append(
+                                f"{prefix}: hop {index} {role} frozen hash mismatch"
+                            )
         if generation.get("question_style") == "short_ordered_steps_v1":
             question = str(case.get("temporal_question", ""))
             sentences = [

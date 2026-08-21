@@ -1,0 +1,20 @@
+{
+  "schema_version": "ready-question-pipeline-freeze-amendment-v1",
+  "recorded_at": "2026-08-20T02:20:00+08:00",
+  "amends": "PIPELINE_V27_FREEZE_MANIFEST.json",
+  "reason": "Pre-resume audit added fail-closed config binding and exact critical-probe contract binding for PK reuse.",
+  "updated_source_hashes": {
+    "spine_pk_reuse_v27.py": "ad3dea74bab4661f0c6d3d37154f375311a4b8617a9eab54e41b9a48222dc561",
+    "resumable_machine_validation_v24.py": "9a6c3445890bd6f12b5a59f80e5b0a8ac7d28f7cec9557342d53d599d493a7f4",
+    "READY_QUESTION_PIPELINE_V2_7.md": "b156c59ddbfa41fd23d10bea5b73283732fd741cfd5a980e6bc815240fc18ff6"
+  },
+  "verification": {
+    "targeted_pytest": "25 passed",
+    "pyflakes": "pass",
+    "mypy": "pass",
+    "same_config_resume": "pass",
+    "changed_config_fail_closed": "pass"
+  },
+  "running_live_processes": 0,
+  "live_v27_end_to_end_smoke_after_amendment": "not_run"
+}

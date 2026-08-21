@@ -10,14 +10,78 @@ OpenRouter 相容 OpenAI 的 /chat/completions 介面，所以這裡直接用
 requests 打 POST，不依賴 openai 這個 SDK，減少依賴。
 """
 
+import json
 import os
+import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from typing import Any, Iterator
+
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+USAGE_SCHEMA = "tkg-model-usage-v1"
+
+
+class UsageLedger:
+    """Thread-safe append-only model call, cache, token, and cost ledger."""
+
+    def __init__(self, path: str, metadata: dict[str, Any] | None = None):
+        self.path = path
+        self.metadata = dict(metadata or {})
+        self._fh = open(path, "a", encoding="utf-8")
+        self._lock = threading.Lock()
+
+    def write(self, event_type: str, **fields: Any) -> None:
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "schema_version": USAGE_SCHEMA,
+            "event_type": event_type,
+            **self.metadata,
+            **fields,
+        }
+        encoded = json.dumps(row, ensure_ascii=False) + "\n"
+        with self._lock:
+            self._fh.write(encoded)
+            self._fh.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._fh.close()
+
+
+_CALL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar(
+    "tkg_openrouter_call_context", default={}
+)
+_USAGE_LEDGER: UsageLedger | None = None
+_USAGE_LEDGER_LOCK = threading.Lock()
+
+
+def set_usage_ledger(ledger: UsageLedger | None) -> None:
+    global _USAGE_LEDGER
+    with _USAGE_LEDGER_LOCK:
+        _USAGE_LEDGER = ledger
+
+
+@contextmanager
+def model_call_context(**fields: Any) -> Iterator[None]:
+    token = _CALL_CONTEXT.set({**_CALL_CONTEXT.get(), **fields})
+    try:
+        yield
+    finally:
+        _CALL_CONTEXT.reset(token)
+
+
+def record_usage_event(event_type: str, **fields: Any) -> None:
+    with _USAGE_LEDGER_LOCK:
+        ledger = _USAGE_LEDGER
+    if ledger is not None:
+        ledger.write(event_type, context=dict(_CALL_CONTEXT.get()), **fields)
 
 
 class OpenRouterError(Exception):
@@ -65,11 +129,35 @@ def _post_chat_completion(payload: dict, max_retries: int, timeout: int) -> dict
                     raise OpenRouterError(f"呼叫 {model} 失敗（client error，不重試）：{message}")
                 raise RuntimeError(message)
             data = resp.json()
-            return data["choices"][0]["message"]
-        except OpenRouterError:
+            message = data["choices"][0]["message"]
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            record_usage_event(
+                "api_call",
+                requested_model=model,
+                response_model=data.get("model"),
+                provider=data.get("provider"),
+                response_id=data.get("id"),
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                cost=usage.get("cost"),
+                usage=usage,
+                attempt=attempt,
+            )
+            return message
+        except OpenRouterError as exc:
+            record_usage_event(
+                "api_error", requested_model=model, attempt=attempt,
+                error_type=type(exc).__name__, error=str(exc), retrying=False,
+            )
             raise  # fail-fast：直接往外拋，不進入下面的重試邏輯
         except Exception as e:  # noqa: BLE001 - 網路/逾時/429/5xx 等真正暫時性的錯誤才重試
             last_err = e
+            record_usage_event(
+                "api_error", requested_model=model, attempt=attempt,
+                error_type=type(e).__name__, error=str(e),
+                retrying=attempt < max_retries,
+            )
             wait = 2 ** attempt
             print(f"[warn] call_model 第 {attempt} 次失敗（{e}），{wait}s 後重試...")
             time.sleep(wait)

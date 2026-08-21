@@ -212,7 +212,15 @@ def _write_temporal_results(path: str):
             "schema_version": "temporal-pk-relative-multihop-v4",
             "navigation_id": "nav-1",
             "start_title": "Source", "start_distance": 1,
-            "reasoning_hop_count": 3, "reasoning_chain": [{"index": 0}],
+            "question": "Who is the updated leader?",
+            "final_answer": "New Person",
+            "reasoning_hop_count": 3, "reasoning_chain": [
+                {
+                    "index": 0, "source_title": "Source", "target_title": "Pivot",
+                    "as_of": "2025-01-01", "relation": "updated leader",
+                    "target_aliases": ["New Person"],
+                }
+            ],
             "temporal_waypoints": [
                 {"index": 0, "title": "Source", "revision_id": 303,
                  "as_of": "2025-01-01", "incoming_edge": "start"},
@@ -244,7 +252,11 @@ def _write_temporal_results(path: str):
                  "as_of": "2025-01-01", "snapshot_token": "2025-01-01"},
             ],
         },
-        {"slot": "final_judgment", "attempt_id": "temporal-1", "label": "correct_after"},
+        {
+            "slot": "final_judgment", "attempt_id": "temporal-1",
+            "label": "correct_after", "response": "New Person",
+            "judgment": {"reason": "The submitted answer matches the target alias."},
+        },
         {"slot": "checkpoint", "attempt_id": "temporal-1", "status": "complete"},
     ]
     with open(path, "w", encoding="utf-8") as fh:
@@ -259,7 +271,7 @@ def test_exporter_builds_page_graph_and_replayable_trajectory():
         _write_cache(cache)
         _write_results(results)
         data = build_visualization_data(cache, results)
-    assert data["schema_version"] == "tkg-visualization-v4"
+    assert data["schema_version"] == "tkg-visualization-v5"
     assert len(data["graph"]["nodes"]) == 4
     assert len(data["graph"]["edges"]) == 3
     nodes = {node["title"]: node for node in data["graph"]["nodes"]}
@@ -325,6 +337,13 @@ def test_temporal_trajectory_reveals_only_switched_page_versions():
     assert trajectory["pk_probe_n"] == 3
     assert trajectory["pk_stick_old_count"] == 3
     assert trajectory["reasoning_hop_count"] == 3
+    assert trajectory["question"] == "Who is the updated leader?"
+    assert trajectory["expected_answer_aliases"] == ["New Person"]
+    assert trajectory["model_answer"] == "New Person"
+    assert trajectory["judgment_label"] == "correct_after"
+    assert trajectory["judgment_reason"] == (
+        "The submitted answer matches the target alias."
+    )
     assert trajectory["knowledge_cutoff"]["cutoff_date"] == "2024-01-01"
     assert trajectory["target_title_revealed"] is False
     assert trajectory["shortest_navigation_steps"] == 2
@@ -338,6 +357,25 @@ def test_temporal_trajectory_reveals_only_switched_page_versions():
     assert nodes[202]["distance_to_pivot"] == 0
     assert trajectory["distance_by_node_id"][nodes[101]["id"]] == 1
     assert trajectory["distance_by_node_id"][nodes[303]["id"]] == 1
+
+
+def test_temporal_correct_answer_with_target_evidence_marks_alternate_path_success():
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = os.path.join(tmp, "temporal.db")
+        results = os.path.join(tmp, "temporal.jsonl")
+        _write_temporal_cache(cache)
+        _write_temporal_results(results)
+        rows = [json.loads(line) for line in open(results, encoding="utf-8")]
+        summary = next(row for row in rows if row.get("slot") == "temporal_summary")
+        summary["pivot_hit"] = False
+        summary["target_snapshot_evidence_seen"] = True
+        with open(results, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+        trajectory = build_visualization_data(cache, results)["trajectories"][0]
+    assert trajectory["page_hit"] is False
+    assert trajectory["alternate_path_success"] is True
+    assert trajectory["proof_path_kind"] == "alternate_target_evidence"
 
 
 def test_outcome_classifier_uses_the_earliest_observable_failure():
@@ -375,6 +413,11 @@ def test_site_builder_copies_self_contained_assets():
         assert (built / "app.js").is_file()
         assert (built / "data.json").is_file()
         assert (built / ".tkg-visualization").is_file()
+        html = (built / "index.html").read_text(encoding="utf-8")
+        script = (built / "app.js").read_text(encoding="utf-8")
+        assert "Question &amp; diagnosis" in html
+        assert 'select.value = options[0].id' in script
+        assert 'updateDiagnosis(); refreshVisibility(); updateTimeline();' in script
 
 
 def main():

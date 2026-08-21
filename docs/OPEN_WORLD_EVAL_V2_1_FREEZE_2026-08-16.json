@@ -1,0 +1,166 @@
+{
+  "schema_version": "open-world-temporal-evaluation-freeze-v2.1",
+  "frozen_at": "2026-08-16",
+  "status": "engineering_evaluation_contract_frozen_fresh_cases_required",
+  "supersedes_pre_freeze_draft": {
+    "path": "docs/OPEN_WORLD_EVAL_V2_FREEZE_2026-08-16.json",
+    "sha256": "baba3a69e932986bfb134a2564974c37f1b28c66cf4e51a2dbaaccaed322d9b0",
+    "reason": "append-only correction adds explicit REFERENCE_ACTION_NOT_RANKED emission and its regression test"
+  },
+  "track": "open_world_temporal_graph_navigation",
+  "formal_benchmark_accuracy_allowed": false,
+  "formal_run_prerequisite": "fresh post-freeze cases with complete semantic validation records",
+  "gold_contract": {
+    "allowed": [
+      "public question",
+      "cutoff date",
+      "target date",
+      "accepted final-answer aliases",
+      "critical temporal claims",
+      "tail relation",
+      "validated evidence requirements",
+      "event-time constraints"
+    ],
+    "reference_routes": "private feasibility witnesses and post-hoc diagnostics only",
+    "unique_gold_trajectory": false,
+    "gold_action_injection": false
+  },
+  "environment": {
+    "node": ["canonical Wikipedia page title", "revision ID"],
+    "complete_hyperlinks": "all unique rendered-revision targets in document order",
+    "link_pagination": {"cursor": "zero-based offset", "page_size": 50},
+    "revision_pagination": {
+      "source": "MediaWiki rvcontinue within inclusive cutoff-target window",
+      "page_size": 50
+    },
+    "exact_switch_validation": "fetch exact revision ID and require unchanged canonical page",
+    "large_set_storage": "complete count, canonical SHA-256, immutable artifact reference",
+    "silent_truncation": false,
+    "shared_query_builder": "forced-state and end-to-end v2 use execute_environment_query_v2"
+  },
+  "solver_policy": {
+    "name": "retrieval_order_first_n_reserving_pagination_v2",
+    "link_page_size": 50,
+    "revision_page_size": 50,
+    "max_environment_queries_per_state": 4,
+    "dense_action_limit": 30,
+    "max_expansions": 40,
+    "max_actions_per_state": 4,
+    "beam_widths": {"B": 1, "C": 3, "D": 5},
+    "solver_limits_are_environment_limits": false,
+    "gold_or_reference_features": false
+  },
+  "ranker": {
+    "api_fallback": "exact distinct IDs, finite numeric utilities, retry once, fail closed",
+    "omitted_action_floor": false,
+    "self_reported_utility_is_decoding_logit": false,
+    "reference_rank_condition": "reference action is compacted and dense contract is valid"
+  },
+  "submission": {
+    "schema_version": "structured-temporal-evidence-submission-v2",
+    "fields": ["answer", "critical_claims", "tail_claim"],
+    "success_requires": [
+      "valid graph actions",
+      "accepted final alias",
+      "trajectory-owned evidence IDs",
+      "literal final-answer support",
+      "semantic bridge support",
+      "valid world-event or tenure-onset time",
+      "semantic tail support",
+      "bridge-tail composition"
+    ],
+    "literal_support_is_semantic_support": false
+  },
+  "semantic_judge": {
+    "model": "openai/gpt-4.1",
+    "version": "posthoc-semantic-claim-judge-v2",
+    "temperature": 0.0,
+    "inference_or_beam_access": false,
+    "recorded": [
+      "complete judge input",
+      "raw and parsed output",
+      "model",
+      "version",
+      "confidence",
+      "deterministic guards",
+      "machine_pass_human_review_required"
+    ],
+    "machine_judge_is_human_ground_truth": false
+  },
+  "primary_metrics": [
+    "end_to_end_validated_answer_accuracy",
+    "critical_bridge_acquisition_rate",
+    "semantically_supported_submission_rate",
+    "temporally_valid_submission_rate"
+  ],
+  "diagnostic_metrics": [
+    "reference_link_retrieval_rate",
+    "reference_witness_revision_retrieval_rate",
+    "reference_route_completion_rate",
+    "rank_of_reference_action_conditional_on_inclusion",
+    "beam_survival_conditional_on_candidate_inclusion",
+    "tool_infrastructure_failure_rate"
+  ],
+  "failure_taxonomy": [
+    "REFERENCE_LINK_NOT_RECALLED",
+    "REFERENCE_WITNESS_REVISION_NOT_RECALLED",
+    "REFERENCE_ROUTE_NOT_COMPLETED",
+    "REFERENCE_ACTION_NOT_RANKED",
+    "RANKER_CONTRACT_FAILURE",
+    "SEARCH_BUDGET_EXHAUSTED",
+    "NO_VALIDATED_EVIDENCE_CHAIN_FOUND"
+  ],
+  "development_replay": {
+    "coach_case_count": 4,
+    "run_record_count": 16,
+    "structured_v2_submissions": 0,
+    "validated_end_to_end_chains": 0,
+    "legacy_full_environment_sets_available": false,
+    "formal_performance_interpretation": false,
+    "artifact": "examples/temporal_eval_v2/coach_development_replay_v2_1.jsonl"
+  },
+  "synthetic_multiroute": {
+    "reference_route_compacted": false,
+    "alternative_route_valid": true,
+    "end_to_end_success": true,
+    "reference_route_recalled": false,
+    "alternative_valid_route_found": true,
+    "artifact": "examples/temporal_eval_v2/synthetic_multiroute_result_v2_1.json"
+  },
+  "sha256": {
+    "pyproject.toml": "a2bb7f2ff01919dce99457ffd1ea3f218c97073a27eb6dadd83f759afb7dc511",
+    "uv.lock": "b1c1dc727b931838aa591fa33b4d25df91fa8dbef8980e7f8b5abffc220dfc3f",
+    "src/tkg/wikipedia/backend.py": "d7942da2500ecaf3078e0c870bc744c0a89a0d300cdfe520045965bbb42e0b74",
+    "src/tkg/experiment/temporal_eval_schema_v2.py": "13d7fb81bd08107a03a53ae1a293ea0a861c6acbf06489ab330bce5f24514723",
+    "src/tkg/experiment/temporal_environment_v2.py": "49a8cefe838e5bf5a3e147faea6874be7cc0d43338550c4f12d33914e60ffc66",
+    "src/tkg/experiment/temporal_evaluation_v2.py": "5b5335dc3b721fe522c9b7c5dabb7ab2ac19cc813559ddc51ddf60ac8fdd0389",
+    "src/tkg/experiment/temporal_submission_v2.py": "94c02b424f9e019555c1b18db28f0dc891657d242dcd55cf8809c87a8c7f2e56",
+    "src/tkg/experiment/temporal_semantic_judge_v2.py": "eb0fa50c7be47d7576f877283f93aae0d2bb81ffd0d21c7773132c884fe7f0b0",
+    "src/tkg/experiment/temporal_eval_v2_replay.py": "6fbd14fe0be27a6251305cd018779508d33e14f6f052014f372b6b32f66b0fb3",
+    "src/tkg/experiment/temporal_eval_v2_synthetic.py": "599d2c57ffe6243d27d46b6982dc44711d359a7b34f9474b34959febcb0e1010",
+    "tests/test_temporal_evaluation_v2.py": "97a0936bb24b2c2f5093361f9e3e15d933d458d028c8c2db1d4e953557358f3d",
+    "tests/test_wikipedia_pipeline.py": "497c60713c663c7027b6bf31b0e60204feb6d136f4120d4c60c036eff2783269",
+    "docs/OPEN_WORLD_EVAL_V2_SCHEMA.json": "4bf26dfbf775f767d01411681c1168772831f292eecded71bdc44874e370767e",
+    "examples/temporal_eval_v2/synthetic_multiroute_case_v2.json": "683e1a12efc86447c7703086fb83a319dc36595f35d3d03cfed8b31a1367c229",
+    "examples/temporal_eval_v2/synthetic_multiroute_result_v2_1.json": "2f6e2ba5c637672b4d43dcc64272bbef318a761bffbc4228533c69938a8dc3ed",
+    "examples/temporal_eval_v2/coach_development_replay_v2_1.jsonl": "7c1ef1992dc5588a7390fc07ec8b221c36243a9ec6e1a261f2aef06b6cdc83d8",
+    "examples/temporal_eval_v2/coach_development_replay_v2_1.md": "034192224db1a7813a3feac0be44a801b1604cb94f6c6b1bb989202fa442f4b2"
+  },
+  "legacy_artifact_sha256": {
+    "docs/SEARCH_CONTRACT_FREEZE_2026-08-15.json": "2f76d0e3a7b68632a90fa8eb7f5538c77f1b3b037c4649b2e489fc84098759ba",
+    "examples/temporal_beam_new_questions_v1/rare_coach_recovery_cases_v1.json": "e0af097c0fb1167a8c5289f98c30a2704d59cb28aca664971804cc4b19e0e5a9",
+    "examples/temporal_beam_new_questions_v1/rare_coach_eventfirst_v6_cases_v1.json": "48d09fbb13457b5f70df7e004f0b3b60f4d8ce72a6bff14f002f300d2cf93621",
+    "examples/temporal_beam_new_questions_v1/end_to_end_batch1_results_v1.jsonl": "751c070630c308ba3e5f1563cc523352ac469938e85d6ee58e6206ffb32cbc52",
+    "examples/temporal_beam_new_questions_v1/end_to_end_batch2_results_v1.jsonl": "a3546d203948939e16ddb987f01c75111684eb836b9f9f4565033ebca5df0d47"
+  },
+  "acceptance_markers": [
+    "MULTI_PATH_EVALUATION_IMPLEMENTED",
+    "REFERENCE_ROUTE_IS_DIAGNOSTIC_ONLY",
+    "ENVIRONMENT_SOLVER_SEPARATION_PASSED",
+    "STRUCTURED_EVIDENCE_SUBMISSION_PASSED",
+    "NO_GOLD_LEAK_TESTS_PASSED",
+    "ALTERNATIVE_ROUTE_SYNTHETIC_TEST_PASSED",
+    "LEGACY_ARTIFACTS_UNCHANGED",
+    "V2_NOT_YET_FORMAL_BENCHMARK_ACCURACY"
+  ]
+}

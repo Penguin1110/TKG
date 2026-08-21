@@ -248,11 +248,19 @@ def test_claim_selector_and_inverse_query_are_direction_explicit():
         "Q2", (by_property["P286"],), after=CUTOFF, until=T3, limit=20,
         request_get=lambda *args, **kwargs: Response(),
     )
-    assert candidates == [EdgeCandidate(
-        spec=by_property["P286"], direction="inverse", next_qid="Q10",
-        next_title="New Team", event_date=T1,
-        qualifier_dates={"P580": T1}, kg_subject_qid="Q10", kg_object_qid="Q2",
-    )]
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.spec == by_property["P286"]
+    assert candidate.direction == "inverse" and candidate.next_qid == "Q10"
+    assert candidate.next_title == "New Team" and candidate.event_date == T1
+    assert candidate.qualifier_dates == {"P580": T1}
+    assert candidate.kg_subject_qid == "Q10" and candidate.kg_object_qid == "Q2"
+    certificate = candidate.event_order_certificate
+    assert certificate is not None
+    assert certificate["boundary_event_date"] == CUTOFF
+    assert certificate["selected_event_date"] == T1
+    assert certificate["selected_target_qid"] == "Q10"
+    assert certificate["complete"] is True
 
 
 def test_evidence_window_anchors_on_complete_visible_hyperlink_token():

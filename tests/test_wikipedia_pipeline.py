@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import sqlite3
 import sys
 import tempfile
 import csv
@@ -15,18 +16,21 @@ from tkg.experiment.contracts import JudgeResult, PageLink, PageSnapshot
 from tkg.experiment.results import JsonlResultStore, assert_new_output_path
 from legacy.wikipedia_prior_reversion_runner import run_trajectory
 from tkg.experiment.temporal_runner import (
-    _capability_metrics, _failure_mode, _navigation_metrics,
+    _capability_metrics, _critical_bridge_evidence_metrics,
+    _failure_mode, _navigation_metrics,
     _snapshot_range, _snapshot_values,
     run_case as run_temporal_case,
     run_pk_admission, write_scores as write_temporal_scores,
 )
 from legacy.wikipedia_prior_reversion_gates import answerability_for_item, evaluate_exposure
 from tkg.judging.llm import LLMJudge, transition_label
-from tkg.wikipedia.backend import WikipediaPageBackend, reverse_bfs_frontier
+from tkg.wikipedia.backend import WikipediaError, WikipediaPageBackend, reverse_bfs_frontier
 from tkg.wikipedia.browser import (
     run_snapshot_selection, run_temporal_browsing, run_wikipedia_browsing,
 )
 from tkg.wikipedia.snapshot import outgoing_bfs, temporal_reverse_bfs
+from tkg.visualization.exporter import build_visualization_data
+from tkg.visualization.server import build_site
 
 
 class _Response:
@@ -93,6 +97,44 @@ class _RevisionDateAPI:
         }]}})
 
 
+class _ExactRevisionAndPaginationAPI:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, url, params, headers, timeout):
+        del url, headers, timeout
+        self.calls.append(dict(params))
+        if params.get("revids") == "77":
+            return _Response({"query": {"pages": [{
+                "pageid": 7,
+                "title": "Exact Page",
+                "revisions": [{
+                    "revid": 77, "parentid": 76,
+                    "timestamp": "2025-02-03T04:05:06Z",
+                }],
+            }]}})
+        if params.get("action") == "parse" and params.get("oldid") == 77:
+            return _Response({"parse": {
+                "title": "Exact Page",
+                "text": '<p>Exact content links <a href="./Target">Target</a>.</p>',
+                "links": [{"ns": 0, "title": "Target"}],
+            }})
+        if params.get("prop") == "revisions" and params.get("titles") == "Busy Page":
+            offset = 2 if params.get("rvcontinue") == "next-2" else 0
+            revisions = [
+                {"revid": 100 + index, "parentid": 99 + index,
+                 "timestamp": f"2025-01-0{index + 1}T00:00:00Z"}
+                for index in range(offset, min(offset + 2, 3))
+            ]
+            result = {"query": {"pages": [{
+                "pageid": 8, "title": "Busy Page", "revisions": revisions,
+            }]}}
+            if offset == 0:
+                result["continue"] = {"rvcontinue": "next-2", "continue": "||"}
+            return _Response(result)
+        raise AssertionError(f"unexpected exact/pagination request: {params}")
+
+
 def _page(title, revision, content, links=()):
     return PageSnapshot(
         title=title, page_id=revision, revision_id=revision,
@@ -120,6 +162,51 @@ def test_backend_revision_dates_are_sampled_cached_and_content_free():
     assert len(api.calls) == 1
     assert api.calls[0]["rvprop"] == "timestamp"
     assert "content" not in json.dumps(first)
+
+
+def test_backend_exact_revision_is_cached_for_offline_environment():
+    api = _ExactRevisionAndPaginationAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = os.path.join(tmp, "wiki.db")
+        backend = WikipediaPageBackend(
+            cache_path=cache, request_get=api, min_request_interval=0,
+        )
+        page = backend.fetch_revision(77)
+        backend.close()
+        offline = WikipediaPageBackend(cache_path=cache, offline_only=True)
+        cached = offline.fetch_revision(77)
+        offline.close()
+    assert page.revision_id == cached.revision_id == 77
+    assert page.title == cached.title == "Exact Page"
+    assert page.links == [PageLink(target="Target", anchor="Target")]
+    assert sum(call.get("revids") == "77" for call in api.calls) == 1
+    assert sum(call.get("action") == "parse" for call in api.calls) == 1
+
+
+def test_backend_revision_metadata_pagination_is_unsampled_and_cached():
+    api = _ExactRevisionAndPaginationAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = WikipediaPageBackend(
+            cache_path=os.path.join(tmp, "wiki.db"), request_get=api,
+            min_request_interval=0,
+        )
+        first = backend.list_revision_metadata_page(
+            "Busy Page", "2025-01-01", "2025-01-31", page_size=2,
+        )
+        second = backend.list_revision_metadata_page(
+            "Busy Page", "2025-01-01", "2025-01-31",
+            cursor=first["next_cursor"], page_size=2,
+        )
+        repeated = backend.list_revision_metadata_page(
+            "Busy Page", "2025-01-01", "2025-01-31",
+            cursor=first["next_cursor"], page_size=2,
+        )
+        backend.close()
+    assert [row["revision_id"] for row in first["revisions"]] == [100, 101]
+    assert [row["revision_id"] for row in second["revisions"]] == [102]
+    assert repeated == second
+    assert len(api.calls) == 2
+    assert all(call["rvprop"] == "ids|timestamp" for call in api.calls)
 
 
 class _MockBackend:
@@ -347,6 +434,58 @@ def test_backend_reuses_parsed_revision_across_requested_dates():
     assert len(parse_calls) == 1
 
 
+def test_backend_caches_backlink_candidate_queries():
+    fake = _FakeWikiAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = WikipediaPageBackend(
+            cache_path=os.path.join(tmp, "wiki.db"), request_get=fake,
+            min_request_interval=0, backlink_verify_workers=4,
+        )
+        assert backend.find_backlinks(
+            "Pivot Page", as_of="2025-01-01", max_results=10,
+        ) == ["Source Page"]
+        first_count = sum(
+            params.get("list") == "backlinks" for _, params in fake.calls
+        )
+        assert backend.find_backlinks(
+            "Pivot Page", as_of="2025-01-01", max_results=10,
+        ) == ["Source Page"]
+        second_count = sum(
+            params.get("list") == "backlinks" for _, params in fake.calls
+        )
+        backend.close()
+    assert first_count == second_count == 1
+
+
+def test_backend_enforces_hard_api_attempt_budget_during_429_retries():
+    calls = []
+
+    def always_429(url, params, headers, timeout):
+        del url, params, headers, timeout
+        calls.append(1)
+        return _Response({}, status=429)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = WikipediaPageBackend(
+            cache_path=os.path.join(tmp, "wiki.db"), request_get=always_429,
+            min_request_interval=0, max_api_calls=2, api_max_retries=6,
+            backoff_base_seconds=0, backoff_max_seconds=0,
+        )
+        try:
+            backend.fetch_page("Rate Limited", as_of="2025-01-01")
+        except WikipediaError as exc:
+            assert "API call budget exhausted" in str(exc)
+        else:
+            raise AssertionError("request budget was not enforced")
+        assert backend.request_stats() == {
+            "api_calls_used": 2,
+            "api_call_budget": 2,
+            "api_calls_remaining": 0,
+        }
+        backend.close()
+    assert len(calls) == 2
+
+
 def test_reverse_bfs_uses_backlinks():
     frontier = reverse_bfs_frontier(_MockBackend(), "Pivot Page", 2, as_of="2025-01-01")
     assert frontier == {0: ["Pivot Page"], 1: ["Source Page"]}
@@ -494,6 +633,9 @@ def test_temporal_browser_lists_only_revision_dates_and_starts_at_cutoff():
     revision_tool = result["tool_contract"][1]["function"]
     assert revision_tool["name"] == "list_revisions"
     assert "comments" in revision_tool["description"]
+    properties = revision_tool["parameters"]["properties"]
+    assert "minimum" not in properties["from"]
+    assert "maximum" not in properties["to"]
 
     capabilities = _capability_metrics(
         result, target_title="Some other proof-route page",
@@ -664,6 +806,112 @@ def test_temporal_judge_positive_answer_must_come_from_tested_response():
     )
 
 
+def test_judge_extracted_answer_allows_markdown_emphasis_in_tested_response():
+    def judge_call(model, messages, temperature=0.0):
+        return json.dumps({
+            "decision": "stick_old", "confidence": 1,
+            "answer_extracted": "The answer is Old Person.",
+            "evidence": "The answer is Old Person.",
+            "reason": "matches the stale alias",
+        })
+
+    result = LLMJudge(
+        "independent/judge", call_model_fn=judge_call,
+    ).judge_answer(
+        "Who?", "The answer is **Old Person**.",
+        ["New Person"], ["Old Person"], [],
+    )
+    assert result.decision == "stick_old"
+    assert "contract_violation" not in result.raw
+
+
+def test_negated_or_quoted_aliases_never_use_deterministic_positive_gate():
+    calls = []
+
+    def judge_call(model, messages, temperature=0.0):
+        calls.append(messages[-1]["content"])
+        return json.dumps({
+            "decision": "unsupported", "confidence": 1.0,
+            "answer_extracted": "New Person", "evidence": "",
+            "reason": "The response explicitly rejects the alias.",
+        })
+
+    judge = LLMJudge("independent/judge", call_model_fn=judge_call)
+    for response in (
+        "It is not New Person.",
+        "The page mentions 'New Person', but that is not the answer.",
+        "New Person is incorrect.",
+    ):
+        result = judge.judge_answer(
+            "Who?", response, ["New Person"], ["Old Person"], []
+        )
+        assert result.decision == "unsupported"
+        assert "deterministic_gate" not in result.raw
+    assert len(calls) == 3
+
+
+def test_llm_cannot_emit_stale_label_when_no_stale_alias_is_configured():
+    def invalid_judge(model, messages, temperature=0.0):
+        return json.dumps({
+            "decision": "stick_old", "confidence": 1,
+            "answer_extracted": "midfielder", "evidence": "",
+            "reason": "incorrectly treated an unrelated answer as stale",
+        })
+
+    result = LLMJudge(
+        "independent/judge", call_model_fn=invalid_judge,
+    ).judge_answer("What position?", "midfielder", ["Defender"], [], [])
+    assert result.decision == "unsupported"
+    assert result.raw["original_decision"] == "stick_old"
+    assert result.raw["contract_violation"] == (
+        "positive_label_without_configured_aliases"
+    )
+
+
+def test_factorized_pk_judge_cannot_mistake_context_entity_for_bridge_answer():
+    def confused_judge(model, messages, temperature=0.0):
+        return json.dumps({
+            "decision": "known", "confidence": 1,
+            "answer_extracted": "David Lammy", "evidence": "David Lammy",
+            "reason": "incorrectly selected an intermediate person",
+        })
+
+    result = LLMJudge(
+        "independent/judge", call_model_fn=confused_judge,
+    ).judge_prior_knowledge(
+        probe_role="critical_bridge",
+        question=(
+            "Who began holding Foreign Secretary on 2025-09-05, after "
+            "David Lammy's tenure?"
+        ),
+        response="David Lammy held it before the later appointment.",
+        answer_aliases=["Yvette Cooper"],
+    )
+
+    assert result.decision == "unjudgeable"
+    assert result.raw["contract_violation"] == "known_answer_not_in_probe_aliases"
+
+
+def test_factorized_composed_judge_fail_closes_on_intermediate_as_final():
+    def confused_judge(model, messages, temperature=0.0):
+        return json.dumps({
+            "decision": "wrong", "confidence": 1,
+            "answer_extracted": "David Lammy", "evidence": "David Lammy",
+            "reason": "incorrectly treated the first-hop answer as final",
+        })
+
+    result = LLMJudge(
+        "independent/judge", call_model_fn=confused_judge,
+    ).judge_prior_knowledge(
+        probe_role="composed", question="Who is the final person's spouse?",
+        response="David Lammy is the first step, but I do not know the spouse.",
+        answer_aliases=["Ed Balls"], context_aliases=["David Lammy"],
+    )
+
+    assert result.decision == "unjudgeable"
+    assert result.raw["contract_violation"] == "wrong_answer_is_context_alias"
+
+
 def test_pk_admission_uses_fresh_context_and_rejects_known_target_answer():
     case = {
         "id": "temporal-case", "temporal_question": "Who is the leader?",
@@ -701,11 +949,137 @@ def test_pk_admission_uses_fresh_context_and_rejects_known_target_answer():
     assert len(calls) == 3
     assert temperatures == [0.0, 0.2, 0.5]
     assert all(len(messages) == 1 and messages[0]["role"] == "user" for messages in calls)
-    assert all("Target date: 2025-01-01" in messages[0]["content"] for messages in calls)
+    tested_prompts = [messages[0]["content"] for messages in calls]
+    assert all("Question: Who is the leader?" in prompt for prompt in tested_prompts)
+    assert all("Target date" not in prompt for prompt in tested_prompts)
+    assert all("knowledge-cutoff" not in prompt for prompt in tested_prompts)
     probes = [row for row in rows if row["slot"] == "pk_probe"]
     assert len(probes) == 6
     assert all(row["fresh_context"] and not row["tools_available"] for row in probes)
     assert [row["probe_temperature"] for row in probes[:3]] == [0.0, 0.2, 0.5]
+
+
+def test_factorized_pk_admission_is_controlled_only_by_critical_bridge():
+    case = {
+        "id": "factorized-case",
+        "temporal_question": "Who is the spouse reached through the later appointment?",
+        "knowledge_cutoff": {"cutoff_date": "2024-06-01"},
+        "prior_knowledge_contract": {
+            "schema_version": "factorized-prior-knowledge-v2",
+            "primary_admission_role": "critical_bridge",
+            "primary_admission_probe_ids": ["bridge_2"],
+            "probes": [
+                {
+                    "id": "bridge_2", "role": "critical_bridge",
+                    "objective": "must_be_unknown",
+                    "question": (
+                        "Who began holding Foreign Secretary on 2025-09-05, "
+                        "after David Lammy's tenure?"
+                    ),
+                    "answer_aliases": ["Yvette Cooper"],
+                },
+                {
+                    "id": "tail", "role": "tail",
+                    "objective": "measure_known_for_composition",
+                    "question": "Who is Yvette Cooper's spouse?",
+                    "answer_aliases": ["Ed Balls"],
+                },
+                {
+                    "id": "composed", "role": "composed",
+                    "objective": "diagnostic_only",
+                    "question": "Who is the spouse reached through the later appointment?",
+                    "answer_aliases": ["Ed Balls"],
+                },
+            ],
+        },
+    }
+
+    class FactorizedJudge:
+        def judge_prior_knowledge(
+            self, *, probe_role, question, response, answer_aliases,
+            context_aliases=None,
+        ):
+            if response.strip() in answer_aliases:
+                return JudgeResult(
+                    "known", 1.0, "exact", response, response,
+                    {"deterministic_gate": "test_alias"},
+                )
+            return JudgeResult("unknown", 1.0, "explicitly unknown")
+
+    def probe(model, messages, temperature=0.0):
+        prompt = messages[0]["content"]
+        if "Who is Yvette Cooper's spouse?" in prompt:
+            return "Ed Balls"
+        if "Who is the spouse reached through the later appointment?" in prompt:
+            return "David Lammy is mentioned, but I don't know the final answer."
+        return "I don't know who succeeded David Lammy."
+
+    with tempfile.TemporaryDirectory() as tmp:
+        output = os.path.join(tmp, "factorized_pk.jsonl")
+        store = JsonlResultStore(output)
+        gate = run_pk_admission(
+            case=case, model="tested/model", target_as_of="2025-09-05",
+            judge=FactorizedJudge(), store=store, repeats=2,
+            max_known_rate=0.0, temperatures=[0.0, 0.2],
+            probe_call_model_fn=probe,
+        )
+        store.close()
+        rows = [json.loads(line) for line in open(output, encoding="utf-8")]
+
+    assert gate["passed"] is True
+    assert gate["reason"] == "critical_bridge_not_known"
+    assert gate["critical_bridge_known_rate"] == 0.0
+    assert gate["tail_known_rate"] == 1.0
+    assert gate["composed_known_rate"] == 0.0
+    assert gate["clean_bridge_composition_candidate"] is True
+    assert gate["pk_contract_version"] == "factorized-prior-knowledge-v2"
+    probes = [row for row in rows if row["slot"] == "pk_probe"]
+    assert len(probes) == 6
+    assert {row["probe_role"] for row in probes} == {
+        "critical_bridge", "tail", "composed",
+    }
+    composed = [row for row in probes if row["probe_role"] == "composed"]
+    assert all(row["label"] == "unknown" for row in composed)
+    forbidden = (
+        "Probe role", "Probe objective", "must_be_unknown", "critical_bridge",
+        "Registered knowledge-cutoff", "Target date", "admission",
+    )
+    assert all(
+        not any(value in row["prompt"] for value in forbidden)
+        for row in probes
+    )
+
+
+def test_acquisition_evidence_requires_every_exact_critical_bridge_revision():
+    case = {
+        "prior_knowledge_contract": {
+            "primary_admission_probe_ids": ["bridge_1", "bridge_2"],
+            "probes": [
+                {"id": "bridge_1", "objective": "must_be_unknown", "hop_index": 0},
+                {"id": "bridge_2", "objective": "must_be_unknown", "hop_index": 1},
+            ],
+        },
+        "reasoning_chain": [
+            {"source_title": "A", "source_revision_id": 10,
+             "evidence": "A appointed B."},
+            {"source_title": "B", "source_revision_id": 20,
+             "evidence": "B was succeeded by C."},
+        ],
+    }
+    result = {"evidence_pages": [
+        {"title": "A", "revision_id": 10, "content": "A appointed B."},
+        {"title": "B", "revision_id": 19, "content": "B was succeeded by C."},
+    ]}
+    partial = _critical_bridge_evidence_metrics(result, case)
+    assert partial["critical_bridges_evidenced"] == 1
+    assert partial["critical_bridge_evidence_complete"] is False
+    result["evidence_pages"][1]["revision_id"] = 20
+    complete = _critical_bridge_evidence_metrics(result, case)
+    assert complete["critical_bridges_evidenced"] == 2
+    assert complete["critical_bridge_evidence_complete"] is True
+    assert _failure_mode({}, "correct_after", "answered", False) == (
+        "correct_without_critical_bridge_evidence"
+    )
 
 
 def test_primary_runner_has_one_question_and_no_ripple_or_control_rounds():
@@ -754,6 +1128,80 @@ def test_primary_runner_has_one_question_and_no_ripple_or_control_rounds():
     assert summary["shortest_arrival"] is True
     assert summary["agent_initial_messages"][0]["role"] == "system"
     assert summary["agent_tool_contract"][0]["function"]["name"] == "switch_snapshot"
+
+
+def test_persisted_temporal_e2e_writes_jsonl_scores_and_viewer():
+    case = {
+        "id": "e2e-case", "wikipedia_title": "Pivot Page",
+        "temporal_question": "Who is the leader?",
+        "wikipedia_before": "2024-01-01", "wikipedia_as_of": "2025-01-01",
+        "old_answer_keywords": ["Old Person"],
+        "new_answer_keywords": ["New Person"],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        results = os.path.join(tmp, "e2e_results.jsonl")
+        scores = os.path.join(tmp, "e2e_scores.csv")
+        cache = os.path.join(tmp, "e2e_snapshot.db")
+        viewer = os.path.join(tmp, "viewer")
+        backend = _TemporalBackend()
+        navigation = temporal_reverse_bfs(
+            backend, "Pivot Page", "2025-01-01",
+            ["2024-01-01", "2025-01-01"], 1, branch_cap=10,
+        )
+        store = JsonlResultStore(results, metadata={
+            "contract_hash": "e2e-contract",
+            "schema_version": "temporal-pk-relative-multihop-v8",
+        })
+        store.write(
+            slot="pk_gate", case_id=case["id"], model="tested/model",
+            arm="admission", passed=True, reason="target_answer_not_known",
+            n=1, stick_new_count=0, stick_old_count=1,
+        )
+        attempt_id = run_temporal_case(
+            case=case, model="tested/model", repeat=0, backend=backend,
+            judge=_MockJudge(), store=store,
+            snapshot_dates=["2024-01-01", "2025-01-01"],
+            navigation=navigation, start_distance=1, max_steps=6,
+            temperature=0.7, browse_call_model_fn=_ScriptedShortestModel(),
+        )
+        assert attempt_id is not None
+        store.write(
+            slot="checkpoint", case_id=case["id"], model="tested/model",
+            arm="temporal", repeat=0, status="complete",
+            attempt_id=attempt_id, navigation_id="e2e-nav",
+        )
+        store.close()
+        write_temporal_scores(results, scores, "e2e-contract")
+
+        conn = sqlite3.connect(cache)
+        conn.execute(
+            "CREATE TABLE page_cache (cache_key TEXT PRIMARY KEY, title TEXT, "
+            "as_of TEXT, data TEXT, fetched_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE page_links (source_key TEXT, target_folded TEXT, "
+            "target_title TEXT)"
+        )
+        for title in ("Source Page", "Pivot Page"):
+            for as_of in ("2024-01-01", "2025-01-01"):
+                page = backend.fetch_page(title, as_of=as_of)
+                key = f"en|{title.casefold()}|{as_of}"
+                conn.execute(
+                    "INSERT INTO page_cache VALUES (?,?,?,?,?)",
+                    (key, title, as_of, json.dumps(page.to_dict()), page.timestamp),
+                )
+        conn.commit()
+        conn.close()
+        data = build_visualization_data(cache, results)
+        site = build_site(data, viewer)
+
+        score_rows = list(csv.DictReader(open(scores, encoding="utf-8")))
+        result_rows = [json.loads(line) for line in open(results, encoding="utf-8")]
+        viewer_payload = json.loads((site / "data.json").read_text(encoding="utf-8"))
+    assert score_rows[0]["n"] == "1"
+    assert any(row["slot"] == "checkpoint" for row in result_rows)
+    assert len(viewer_payload["trajectories"]) == 1
+    assert viewer_payload["trajectories"][0]["outcome_reason"] == "correct_after"
 
 
 def test_temporal_scores_report_shortest_path_and_cycle_diagnostics():

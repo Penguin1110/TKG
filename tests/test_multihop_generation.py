@@ -9,9 +9,10 @@ import pytest
 
 from tkg.experiment.case_validation import validate_case, validate_chain_route
 from tkg.experiment.multihop_generation import (
-    MultiHopQuestionJudge, MultiHopSeed, build_case, compose_canonical_question,
-    compose_relative_question,
-    has_infrastructure_error, validate_chain, validate_shortest_arena,
+    MultiHopQuestionJudge, MultiHopQuestionWriter, MultiHopSeed, build_case,
+    compose_canonical_question, compose_relative_question,
+    has_infrastructure_error, question_wording_errors, validate_chain,
+    validate_shortest_arena,
 )
 from tkg.experiment.model_cutoffs import get_model_cutoff, model_matches_cutoff
 from tkg.experiment.temporal_runner import _semantic_waypoint_metrics
@@ -130,6 +131,7 @@ def _seed_dict():
         "target_as_of": TARGET,
         "anchor_label": "Example Corp",
         "category": "corporate",
+        "old_answer_keywords": ["Alice Stone"],
         "hops": [
             {
                 "source_title": "Example Corp", "target_title": "Alice Stone",
@@ -168,15 +170,278 @@ def test_question_uses_short_ordered_steps_and_hides_entities():
     assert "Alice Stone" not in question
     assert "Bob Reed" not in question
     assert "Carol Reed" not in question
+    assert "after that" not in question.casefold()
+    assert question.casefold().count("after") == 2
+    assert "snapshot used in the previous step" not in question.casefold()
+    assert "event identified in the previous step occurred" in question.casefold()
     assert len(question.split(". ")) == 4
-    assert max(len(sentence.split()) for sentence in question.split(". ")) < 25
     canonical = compose_canonical_question(seed)
-    assert canonical.count("the ") > question.split(". ")[-1].count("the ")
+    assert len(canonical.split()) > max(
+        len(sentence.split()) for sentence in question.split(". ")
+    )
     errors, chain = validate_chain(seed, FakeBackend())
     assert errors == []
     case = build_case(seed, chain, {"decision": "pending", "confidence": 0.0})
     assert case["_generation"]["canonical_question"] == canonical
-    assert case["_generation"]["question_style"] == "short_ordered_steps_v1"
+    assert case["_generation"]["question_style"] == "explicit_event_anchored_steps_v3"
+
+
+def test_public_anchor_substring_is_not_hidden_entity_leakage():
+    value = _seed_dict()
+    value["anchor_label"] = "Deputy Mayor of Example"
+    value["hops"][0]["source_title"] = "Deputy Mayor of Example"
+    value["hops"][1]["target_title"] = "Mayor of Example"
+    value["hops"][2]["source_title"] = "Mayor of Example"
+    seed = MultiHopSeed.from_dict(value)
+    question = compose_relative_question(seed)
+    assert "Deputy Mayor of Example" in question
+    assert not any(
+        "hidden entity name 'Mayor of Example'" in error
+        for error in question_wording_errors(seed, question)
+    )
+
+
+def test_validator_rejects_entity_cycle_created_by_canonical_redirect():
+    class RedirectCycleBackend(FakeBackend):
+        def fetch_page(self, title, as_of=None):
+            page = super().fetch_page(title, as_of)
+            if title == "Example Corp":
+                return _page(
+                    "Bob Reed", page.revision_id, as_of, page.content,
+                    [(link.target, link.anchor) for link in page.links],
+                )
+            return page
+
+    errors, _ = validate_chain(
+        MultiHopSeed.from_dict(_seed_dict()), RedirectCycleBackend(),
+    )
+    assert "fetched reasoning chain contains a canonical entity cycle" in errors
+
+
+def test_question_writer_naturalizes_without_hidden_entities_or_oracle_dates():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+
+    def fake_call(model, messages, temperature=0.0):
+        private_prompt = messages[-1]["content"]
+        assert '"private_source_entity": "Alice Stone"' in private_prompt
+        assert '"private_target_entity": "Bob Reed"' in private_prompt
+        assert '"private_target_entity": "Carol Reed"' in private_prompt
+        assert '"as_of"' not in private_prompt
+        return json.dumps({"steps": [
+            "At the tested model's registered knowledge cutoff, who was Example Corp's chief executive officer?",
+            "After the registered knowledge cutoff, who was that person's second successor as chief executive officer?",
+            "At the target snapshot, after the event identified in the previous step occurred, who is that successor's spouse?",
+        ]})
+
+    generated = MultiHopQuestionWriter(
+        "writer/model", call_model_fn=fake_call,
+    ).write(seed)
+    question = generated["question"]
+    assert generated["model"] == "writer/model"
+    assert generated["attempts"] == 1
+    assert generated["private_entity_context_supplied"] is True
+    assert "after the event identified in the previous step occurred" in question
+    assert "snapshot used in the previous step" not in question
+    assert "after that" not in question.casefold()
+    assert "Alice Stone" not in question
+    assert "Bob Reed" not in question
+    assert "Carol Reed" not in question
+
+
+def test_question_writer_rejects_a_leaked_canonical_entity_name():
+    value = _seed_dict()
+    value["hops"][1]["target_aliases"] = ["B. Reed"]
+    seed = MultiHopSeed.from_dict(value)
+
+    def leaking_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "At the tested model's registered knowledge cutoff, who was Example Corp's chief executive officer?",
+            "After the registered knowledge cutoff, who was that person's second successor, Bob Reed?",
+            "At the target snapshot, after the event identified in the previous step occurred, who is that successor's spouse?",
+        ]})
+
+    with pytest.raises(ValueError, match="hidden entity name 'Bob Reed'"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=leaking_call,
+        ).write(seed)
+
+
+def test_question_writer_rejects_ambiguous_after_that_even_after_retry():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+
+    def ambiguous_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "Start with Example Corp at the registered knowledge cutoff.",
+            "Find its next leader after that.",
+            "At the target snapshot, who is that person's spouse?",
+        ]})
+
+    with pytest.raises(ValueError, match="question writer failed gates"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=ambiguous_call,
+        ).write(seed)
+
+
+def test_question_writer_rejects_a_solver_selected_snapshot_boundary():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+
+    def browsing_dependent_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "At the registered knowledge cutoff, who was Example Corp's chief executive officer?",
+            "After the registered knowledge cutoff, who was that person's second successor as chief executive officer?",
+            "At the target snapshot, strictly later than the snapshot used in the previous step, who is that successor's spouse?",
+        ]})
+
+    with pytest.raises(ValueError, match="solver-selected snapshot"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=browsing_dependent_call,
+        ).write(seed)
+
+
+def test_question_writer_rejects_an_unbound_tenure_pronoun():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    seed = MultiHopSeed.from_dict(value)
+
+    def unbound_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "Who held Example Corp's chief executive office at the registered knowledge cutoff?",
+            "After the registered knowledge cutoff, what position did that person first begin holding?",
+            "At the target snapshot, who next began holding that position after its tenure began?",
+        ]})
+
+    with pytest.raises(ValueError, match="bind its event boundary"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=unbound_call,
+        ).write(seed)
+
+
+def test_p39_fallback_requires_a_new_tenure_onset():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    value["hops"][1]["relative_clause"] = (
+        "the next government position held by {source} after that"
+    )
+    value["hops"][1]["structured_evidence"] = {"direction": "forward"}
+    question = compose_relative_question(MultiHopSeed.from_dict(value))
+    assert "first government position" in question
+    assert "began holding" in question
+    assert "after that" not in question.casefold()
+
+
+def test_p39_writer_accepts_interrogative_begin_holding_wording():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    value["hops"][1]["relative_clause"] = (
+        "the next government position held by {source} after that"
+    )
+    value["hops"][1]["structured_evidence"] = {"direction": "forward"}
+    seed = MultiHopSeed.from_dict(value)
+
+    def fake_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "At the registered knowledge cutoff, who was Example Corp's chief executive officer?",
+            "After the registered knowledge cutoff, which position did that person first begin holding?",
+            "At the target snapshot, after the person identified two steps earlier began holding that position, who is that person's spouse?",
+        ]})
+
+    generated = MultiHopQuestionWriter(
+        "writer/model", call_model_fn=fake_call,
+    ).write(seed)
+    assert "begin holding" in generated["question"]
+
+
+def test_p39_scoped_relation_rejects_uncertified_first_claim():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    value["hops"][1]["structured_evidence"] = {
+        "direction": "forward", "temporal_operator": "relation_after_boundary",
+    }
+    seed = MultiHopSeed.from_dict(value)
+
+    def invented_first(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "Who led Example Corp at the registered knowledge cutoff?",
+            "What was the first position that person began holding after the registered knowledge cutoff?",
+            "At the target snapshot, who is the spouse after the event identified in the previous step occurred?",
+        ]})
+
+    with pytest.raises(ValueError, match="uncertified first/next"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=invented_first,
+        ).write(seed)
+
+
+def test_p39_writer_rejects_a_redundant_tenure_clause():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    value["hops"][1]["relative_clause"] = (
+        "the next government position held by {source} after that"
+    )
+    seed = MultiHopSeed.from_dict(value)
+
+    def redundant_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "At the registered knowledge cutoff, who was Example Corp's chief executive officer?",
+            "After the registered knowledge cutoff, what was the first position that person began holding, and had their tenure begun?",
+            "At the target snapshot, after the tenure identified in the previous step began, who is that person's spouse?",
+        ]})
+
+    with pytest.raises(ValueError, match="redundantly restates"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=redundant_call,
+        ).write(seed)
+
+
+def test_p39_writer_rejects_a_redundant_participial_tenure_clause():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    value["hops"][1]["structured_evidence"] = {"direction": "forward"}
+    seed = MultiHopSeed.from_dict(value)
+
+    def redundant_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "Who led Example Corp at the registered knowledge cutoff?",
+            "After the registered knowledge cutoff, what position did that person first begin holding, with that tenure beginning?",
+            "At the target snapshot, who is that person's spouse after the person identified two steps earlier began holding that position?",
+        ]})
+
+    with pytest.raises(ValueError, match="redundantly restates"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=redundant_call,
+        ).write(seed)
+
+
+def test_question_writer_rejects_a_dangling_target_snapshot_fragment():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+
+    def dangling_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "Who led Example Corp at the registered knowledge cutoff?",
+            "After the registered knowledge cutoff, who was that person's second successor?",
+            "Who is that successor's spouse, target snapshot?",
+        ]})
+
+    with pytest.raises(ValueError, match="attach the answer to the target snapshot"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=dangling_call,
+        ).write(seed)
+
+
+def test_question_writer_rejects_non_question_step_fragments():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+
+    def fragmented_call(model, messages, temperature=0.0):
+        return json.dumps({"steps": [
+            "Who led Example Corp at the registered knowledge cutoff,",
+            "After the registered knowledge cutoff, who was that person's second successor,",
+            "At the target snapshot, after the event identified in the previous step occurred, who is that person's spouse?",
+        ]})
+
+    with pytest.raises(ValueError, match="standalone question"):
+        MultiHopQuestionWriter(
+            "writer/model", call_model_fn=fragmented_call,
+        ).write(seed)
 
 
 def test_cutoff_registry_is_exact_and_cases_do_not_cross_models():
@@ -203,7 +468,26 @@ def test_chain_gate_verifies_revision_evidence_and_links():
     assert len(case["temporal_waypoints"]) == 6
     assert case["hide_pivot_title"] is True
     assert case["old_answer_keywords"] == []
+    composed_probe = next(
+        probe for probe in case["prior_knowledge_contract"]["probes"]
+        if probe["role"] == "composed"
+    )
+    assert composed_probe["context_aliases"] == ["Alice Stone", "Bob Reed"]
     assert validate_case(case) == []
+
+
+def test_chain_gate_accepts_exact_hyperlink_through_verified_redirect():
+    backend = FakeBackend()
+    backend.pages[("Alice Stone", CUTOFF)].title = "Alice Stone (executive)"
+    backend.pages[("Alice Stone", MIDDLE)].title = "Alice Stone (executive)"
+
+    errors, chain = validate_chain(MultiHopSeed.from_dict(_seed_dict()), backend)
+
+    assert errors == []
+    assert chain[0]["requested_target_title"] == "Alice Stone"
+    assert chain[0]["target_title"] == "Alice Stone (executive)"
+    assert chain[1]["requested_source_title"] == "Alice Stone"
+    assert chain[1]["source_title"] == "Alice Stone (executive)"
 
 
 def test_same_snapshot_attribute_tail_adds_hyperlink_without_fake_time_switch():
@@ -269,6 +553,48 @@ def test_same_snapshot_attribute_tail_adds_hyperlink_without_fake_time_switch():
     metrics = _semantic_waypoint_metrics({"trajectory": trajectory}, case)
     assert metrics["semantic_route_complete"] is True
     assert metrics["semantic_waypoints_completed"] == 7
+
+
+def test_wikidata_next_edge_requires_event_order_certificate():
+    value = _seed_dict()
+    value["hops"][1]["property_id"] = "P39"
+    value["hops"][1]["relative_clause"] = (
+        "the next government position held by {source}"
+    )
+    value["hops"][1]["structured_evidence"] = {
+        "source": "wikidata_time_qualified_statement",
+        "direction": "forward", "temporal_operator": "next_after_boundary",
+        "event_date": MIDDLE, "kg_subject_qid": "Q1",
+        "kg_object_qid": "Q2",
+    }
+    errors, _ = validate_chain(MultiHopSeed.from_dict(value), FakeBackend())
+    assert any("missing event_order_certificate" in error for error in errors)
+
+
+def test_frozen_rendered_evidence_detects_content_tampering():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+    errors, chain = validate_chain(seed, FakeBackend())
+    assert errors == []
+    case = build_case(seed, chain, {"decision": "pass", "confidence": 1.0})
+    assert validate_case(case) == []
+    case["frozen_wikipedia_evidence"]["pages"][0]["content"] += " tampered"
+    errors = validate_case(case)
+    assert any("content hash mismatch" in error for error in errors)
+
+
+def test_invalidated_generation_v5_cannot_enter_runner_preflight():
+    seed = MultiHopSeed.from_dict(_seed_dict())
+    errors, chain = validate_chain(seed, FakeBackend())
+    assert errors == []
+    case = build_case(seed, chain, {"decision": "pass", "confidence": 1.0})
+    case["_generation"]["schema_version"] = (
+        "wikipedia-cutoff-relative-multihop-v5"
+    )
+    case["prior_knowledge_contract"]["schema_version"] = (
+        "factorized-prior-knowledge-v1"
+    )
+    errors = validate_case(case)
+    assert any("generation v5 is invalidated" in error for error in errors)
 
 
 def test_attribute_tail_generator_requires_wikidata_and_revision_hyperlink():
@@ -385,7 +711,9 @@ def test_independent_semantic_judge_confidence_gate():
         return '{"decision":"pass","confidence":0.92,"checks":{' \
                '"evidence_semantics":true,"relation_order_and_composition":true,' \
                '"cutoff_and_snapshot_anchoring":true,' \
-               '"multi_hop_and_uniqueness":true,"no_entity_leakage":true},' \
+               '"multi_hop_and_uniqueness":true,"no_entity_leakage":true,' \
+               '"temporal_transition_clarity":true,' \
+               '"natural_question_wording":true},' \
                '"reason":"supported","rejected_hops":[]}'
 
     result = MultiHopQuestionJudge("judge/model", call_model_fn=fake_call).judge(
@@ -414,7 +742,9 @@ def test_semantic_judge_reuses_content_hash_cache(tmp_path):
         return '{"decision":"pass","confidence":0.92,"checks":{' \
                '"evidence_semantics":true,"relation_order_and_composition":true,' \
                '"cutoff_and_snapshot_anchoring":true,' \
-               '"multi_hop_and_uniqueness":true,"no_entity_leakage":true},' \
+               '"multi_hop_and_uniqueness":true,"no_entity_leakage":true,' \
+               '"temporal_transition_clarity":true,' \
+               '"natural_question_wording":true},' \
                '"reason":"supported","rejected_hops":[]}'
 
     cache_path = str(tmp_path / "judge.db")

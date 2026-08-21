@@ -3,8 +3,8 @@
 This module closes the loop between relation profiling and formal question
 admission.  Wikidata proposes time-qualified edges, exact historical Wikipedia
 revisions prove that those edges were visible, a bounded beam search composes
-strictly later entity transitions, and the existing deterministic/LLM gates
-admit final cases.  A content-addressed SQLite ledger prevents regeneration of
+world-event-ordered entity transitions, and the existing deterministic/LLM
+gates admit final cases. A content-addressed SQLite ledger prevents regeneration of
 the same semantic path across scheduled runs.
 """
 
@@ -28,12 +28,15 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
-from tkg.api.openrouter import call_model
+from tkg.api.openrouter import call_model, model_call_context
 from tkg.experiment.attribute_tail_generation import generate_attribute_tail_variants
+from tkg.experiment.event_order import build_event_order_certificate
 from tkg.experiment.model_cutoffs import get_model_cutoff
 from tkg.experiment.multihop_generation import (
     MultiHopQuestionJudge,
+    MultiHopQuestionWriter,
     MultiHopSeed,
+    QuestionWriterGateError,
     build_case,
     compose_relative_question,
     has_infrastructure_error,
@@ -56,7 +59,7 @@ from tkg.wikipedia.backend import WikipediaError, WikipediaPageBackend
 from tkg.wikipedia.pageviews import PopularitySnapshot, fetch_top_pageviews
 
 
-ENGINE_SCHEMA = "renewable-temporal-question-engine-v2"
+ENGINE_SCHEMA = "renewable-temporal-question-engine-v3"
 ADMITTED_RECOMMENDATIONS = {
     "semantic_validated_candidate_human_review_required",
 }
@@ -379,6 +382,7 @@ class EdgeCandidate:
     qualifier_dates: dict[str, str]
     kg_subject_qid: str
     kg_object_qid: str
+    event_order_certificate: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -526,6 +530,35 @@ def _next_forward_record(
     return None
 
 
+def _forward_event_order_certificate(
+    claims: Any, spec: TemporalRelationSpec, *, after: str, until: str,
+    selected: ClaimRecord,
+) -> dict[str, Any]:
+    previous = select_claim_at(claims, spec, after)
+    previous_qid = previous.target_qid if previous is not None else None
+    candidates = []
+    for record in _claim_records(claims):
+        event = record.point if spec.time_mode == "point" else record.start
+        if spec.time_mode == "either":
+            event = record.start or record.point
+        if (
+            event is not None and after < event <= until
+            and record.target_qid != previous_qid
+        ):
+            candidates.append({
+                "event_date": event, "target_qid": record.target_qid,
+            })
+    selected_event = selected.point if spec.time_mode == "point" else selected.start
+    if spec.time_mode == "either":
+        selected_event = selected.start or selected.point
+    assert selected_event is not None
+    return build_event_order_certificate(
+        boundary_event_date=after, selected_event_date=selected_event,
+        selected_target_qid=selected.target_qid, candidate_events=candidates,
+        coverage_end=until, source="wikidata_entity_claims",
+    )
+
+
 def inverse_transition_query(
     current_qid: str,
     specs: Iterable[TemporalRelationSpec],
@@ -574,6 +607,10 @@ def query_inverse_candidates(
         current_qid, inverse_specs, after=after, until=until, limit=limit
     )
     rows = _wdqs_rows(query, request_get)
+    if len(rows) >= limit:
+        # A LIMIT-saturated response cannot prove that the earliest candidate set
+        # is exhaustive, so it cannot support a "next" edge.
+        return []
     by_property = {spec.property_id: spec for spec in inverse_specs}
     grouped: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for row in rows:
@@ -605,11 +642,24 @@ def query_inverse_candidates(
             continue
         source_qid, source_title = sources[0]
         qualifier = "P585" if spec.time_mode == "point" else "P580"
+        candidate_events = [
+            {"event_date": candidate_event, "target_qid": source_qid_value}
+            for (prop, candidate_event), values in grouped.items()
+            if prop == property_id
+            for source_qid_value, _ in sorted(set(values))
+        ]
         candidates.append(EdgeCandidate(
             spec=spec, direction="inverse", next_qid=source_qid,
             next_title=source_title, event_date=event,
             qualifier_dates={qualifier: event}, kg_subject_qid=source_qid,
             kg_object_qid=current_qid,
+            event_order_certificate=build_event_order_certificate(
+                boundary_event_date=after, selected_event_date=event,
+                selected_target_qid=source_qid,
+                candidate_events=candidate_events, coverage_end=until,
+                source="wikidata_sparql_inverse_transition_query",
+                source_query_sha256=hashlib.sha256(query.encode()).hexdigest(),
+            ),
         ))
     return candidates
 
@@ -904,6 +954,7 @@ class BeamState:
     current_qid: str
     current_title: str
     current_as_of: str
+    current_event_date: str
     property_steps: tuple[dict[str, str], ...]
     families: frozenset[str]
     score: float
@@ -1182,6 +1233,7 @@ class RenewableQuestionEngine:
                 hops=(hop,), entity_qids=(qid, selected.target_qid),
                 current_qid=selected.target_qid, current_title=target_title,
                 current_as_of=self.cutoff,
+                current_event_date=self.cutoff,
                 property_steps=({"property_id": spec.property_id, "direction": "forward"},),
                 families=frozenset({spec.family}), score=score,
                 anchor_views=views, last_answer_kind=spec.answer_kind,
@@ -1198,7 +1250,8 @@ class RenewableQuestionEngine:
     @staticmethod
     def _state_sort_key(state: BeamState) -> tuple[Any, ...]:
         return (
-            -len(state.families), -state.score, state.current_as_of,
+            -len(state.families), -state.score, state.current_event_date,
+            state.current_as_of,
             state.current_title.casefold(), state.entity_qids,
         )
 
@@ -1209,7 +1262,7 @@ class RenewableQuestionEngine:
         for spec in self.specs:
             record = _next_forward_record(
                 claims_by_property.get(spec.property_id, []), spec,
-                after=state.current_as_of, until=self.until,
+                after=state.current_event_date, until=self.until,
             )
             if record is not None:
                 pending.append((spec, record))
@@ -1231,14 +1284,19 @@ class RenewableQuestionEngine:
                 qualifier_dates=record.qualifier_dates,
                 kg_subject_qid=state.current_qid,
                 kg_object_qid=record.target_qid,
+                event_order_certificate=_forward_event_order_certificate(
+                    claims_by_property.get(spec.property_id, []), spec,
+                    after=state.current_event_date, until=self.until,
+                    selected=record,
+                ),
             ))
         return result
 
     def _inverse_candidates(self, state: BeamState) -> list[EdgeCandidate]:
-        key = (state.current_qid, state.current_as_of)
+        key = (state.current_qid, state.current_event_date)
         if key not in self._inverse_cache:
             self._inverse_cache[key] = self.inverse_lookup_fn(
-                state.current_qid, self.specs, after=state.current_as_of,
+                state.current_qid, self.specs, after=state.current_event_date,
                 until=self.until, limit=self.inverse_limit,
             )
         return list(self._inverse_cache[key])
@@ -1283,6 +1341,7 @@ class RenewableQuestionEngine:
             packet = {
                 "stage": "expand", "source_qid": state.current_qid,
                 "source_title": state.current_title, "prior_as_of": state.current_as_of,
+                "prior_event_date": state.current_event_date,
                 "property_id": candidate.spec.property_id,
                 "direction": candidate.direction, "target_qid": candidate.next_qid,
                 "target_title": candidate.next_title, "event_date": candidate.event_date,
@@ -1356,10 +1415,12 @@ class RenewableQuestionEngine:
                 "kg_subject_qid": candidate.kg_subject_qid,
                 "kg_object_qid": candidate.kg_object_qid,
                 "event_date": candidate.event_date,
+                "temporal_operator": "next_after_boundary",
                 "qualifier_dates": candidate.qualifier_dates,
                 "selection_policy": spec.selection_policy,
                 "relation_profile_sha256s": list(admission.profile_sha256s),
                 "relation_profile_recommendations": list(admission.recommendations),
+                "event_order_certificate": candidate.event_order_certificate,
             }
             if contrast_result is not None:
                 raw_response = str(contrast_result.get("raw_response", ""))
@@ -1395,6 +1456,7 @@ class RenewableQuestionEngine:
                 current_qid=candidate.next_qid,
                 current_title=candidate.next_title,
                 current_as_of=support.as_of,
+                current_event_date=candidate.event_date,
                 property_steps=(*state.property_steps, {
                     "property_id": spec.property_id, "direction": candidate.direction,
                 }),
@@ -1441,7 +1503,9 @@ class RenewableQuestionEngine:
             "anchor_label": state.hops[0]["source_title"],
             "answer_kind": state.last_answer_kind,
             "category": "mixed_temporal",
-            "old_answer_keywords": list(state.hops[0]["target_aliases"]),
+            # A prefix entity is not a stale answer to the composed question.
+            # No stale final answer is emitted without a dedicated old-value gate.
+            "old_answer_keywords": [],
             "hops": list(state.hops),
             "selection_metadata": {
                 "engine_schema_version": ENGINE_SCHEMA,
@@ -1660,6 +1724,7 @@ def admit_seeds(
     ledger: QuestionLedger,
     judge_workers: int,
     backlink_branch_cap: int,
+    writer: MultiHopQuestionWriter | None = None,
     arena_node_cap: int = 500,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run deterministic route gates, then the independent whole-chain judge."""
@@ -1670,6 +1735,8 @@ def admit_seeds(
         seed = MultiHopSeed.from_dict(seed_value)
         errors, chain = validate_chain(seed, backend)
         shortest = None
+        question = compose_relative_question(seed)
+        question_generation = None
         if not errors:
             try:
                 shortest = validate_shortest_arena(
@@ -1678,10 +1745,21 @@ def admit_seeds(
                 )
             except (WikipediaError, ValueError) as exc:
                 errors.append(f"shortest_path: {exc}")
+        if not errors and writer is not None:
+            try:
+                with model_call_context(role="question_writer", seed_id=seed.id):
+                    question_generation = writer.write(seed)
+                question = str(question_generation["question"])
+            except QuestionWriterGateError as exc:
+                question_generation = exc.to_dict()
+                errors.append(f"question writer: {exc}")
+            except Exception as exc:
+                errors.append(f"question writer: {exc}")
         packet: dict[str, Any] = {
             "schema_version": ENGINE_SCHEMA,
             "seed_id": seed.id, "question_fingerprint": fingerprint,
-            "question": compose_relative_question(seed), "chain": chain,
+            "question": question, "question_generation": question_generation,
+            "chain": chain,
             "shortest_path": shortest, "deterministic_errors": errors,
         }
         if errors:
@@ -1726,7 +1804,9 @@ def admit_seeds(
                 if judged.get("decision") == "pass":
                     packet["status"] = "machine_pass_human_review_required"
                     accepted_by_index[index] = build_case(
-                        seed, list(packet["chain"]), judged
+                        seed, list(packet["chain"]), judged,
+                        question=str(packet["question"]),
+                        question_generation=packet.get("question_generation"),
                     )
                     ledger_status = "machine_pass_human_review_required"
                 else:
@@ -1803,6 +1883,10 @@ def main() -> int:
     )
     parser.add_argument("--popularity-month")
     parser.add_argument("--no-popularity-ranking", action="store_true")
+    parser.add_argument(
+        "--generator-model",
+        help="LLM question writer; omit only to use the explicit deterministic fallback",
+    )
     parser.add_argument("--judge-model")
     parser.add_argument("--judge-workers", type=int, default=4)
     parser.add_argument("--judge-min-confidence", type=float, default=0.8)
@@ -1845,7 +1929,11 @@ def main() -> int:
         if not args.judge_model:
             parser.error("--judge-model is required unless --seeds-only")
         if not os.environ.get("OPENROUTER_API_KEY"):
-            parser.error("OPENROUTER_API_KEY is required for judging")
+            parser.error("OPENROUTER_API_KEY is required for generation and judging")
+        if args.generator_model and args.generator_model == args.judge_model:
+            parser.error("--generator-model and --judge-model must differ")
+    elif args.generator_model:
+        parser.error("--generator-model cannot be used with --seeds-only")
     if args.edge_judge_model and not os.environ.get("OPENROUTER_API_KEY"):
         parser.error("OPENROUTER_API_KEY is required for edge contrast judging")
     output_paths = [args.seeds_output, args.packets_output]
@@ -1878,6 +1966,7 @@ def main() -> int:
     )
     ledger = QuestionLedger(args.ledger_path)
     judge = None
+    writer = None
     edge_judge = None
     try:
         edge_judge_model = args.edge_judge_model or (
@@ -1956,6 +2045,8 @@ def main() -> int:
                 "max_per_property": args.max_per_property,
                 "popularity_month": popularity.month if popularity else None,
                 "edge_judge_model": edge_judge_model,
+                "generator_model": args.generator_model,
+                "judge_model": args.judge_model,
                 "backlink_branch_cap": args.backlink_branch_cap,
                 "arena_node_cap": args.arena_node_cap,
             },
@@ -1986,8 +2077,12 @@ def main() -> int:
                 args.judge_model, min_confidence=args.judge_min_confidence,
                 cache_path=args.judge_cache_path or f"{args.cache_path}.judge.db",
             )
+            writer = (
+                MultiHopQuestionWriter(args.generator_model)
+                if args.generator_model else None
+            )
             admission_packets, cases = admit_seeds(
-                selected, backend=backend, judge=judge, ledger=ledger,
+                selected, backend=backend, judge=judge, writer=writer, ledger=ledger,
                 judge_workers=args.judge_workers,
                 backlink_branch_cap=args.backlink_branch_cap,
                 arena_node_cap=args.arena_node_cap,

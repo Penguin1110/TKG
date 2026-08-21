@@ -1,0 +1,113 @@
+{
+  "schema_version": "open-world-temporal-live-runner-freeze-v2.2",
+  "frozen_at": "2026-08-16",
+  "status": "engineering_runner_frozen_fresh_development_cases_required",
+  "depends_on_evaluation_freeze": {
+    "path": "docs/OPEN_WORLD_EVAL_V2_1_FREEZE_2026-08-16.json",
+    "sha256": "07bc396f7a16ff500a8997da83d1d0b77e6aeaf1fbc7c4c43051a925524c545d"
+  },
+  "development_case_policy": {
+    "germany_canada": "development_only_and_not_rerun_or_tuned_in_v2.2",
+    "synthetic_multiroute": "engineering_fixture_only",
+    "formal_benchmark_accuracy_allowed": false
+  },
+  "inference_boundary": {
+    "runner_input": "PublicTemporalCaseV2 only",
+    "private_case_input_supported": false,
+    "wikidata_qids_allowed": false,
+    "accepted_aliases_allowed": false,
+    "reference_routes_allowed": false,
+    "witnesses_allowed": false,
+    "private_evaluation_timing": "after live search returns"
+  },
+  "beam_state": [
+    "current page",
+    "current revision ID and timestamp",
+    "snapshot as-of time",
+    "reasoning summary",
+    "extracted entities",
+    "trajectory-owned evidence",
+    "retrieved actions and pagination cursors",
+    "visited (page, revision ID) nodes",
+    "complete action trace",
+    "cumulative score",
+    "structured submission and termination status"
+  ],
+  "environment": {
+    "node": ["Wikipedia page title", "revision ID"],
+    "follow_validity": "target must occur in current rendered revision hyperlinks",
+    "switch_validity": "exact revision must retain current page title",
+    "legal_action_audit": "complete per-node manifest with canonical count and SHA-256",
+    "solver_access": "explicit LIST_LINKS and LIST_REVISIONS pagination only"
+  },
+  "candidate_policy": {
+    "name": "retrieval_order_transitions_reserving_control_and_submit_v2.2",
+    "link_page_size": 50,
+    "revision_page_size": 50,
+    "max_environment_queries_per_node": 4,
+    "dense_action_limit": 30,
+    "gold_or_reference_features": false,
+    "structured_submission_proposed_each_unfinished_state": true,
+    "submit_admission": "trajectory evidence ownership plus noun-phrase and literal-tail gate"
+  },
+  "ranker": {
+    "api_fallback_name": "api_live_dense_utility_fallback_not_decoding_v2.2",
+    "output_shape": "list of distinct action_id and finite utility records",
+    "exact_id_coverage": true,
+    "missing_unexpected_or_duplicate_action": "retry once then fail closed",
+    "omission_floor": false,
+    "raw_response_recorded": true,
+    "api_utility_is_decoding_logprob": false,
+    "open_weight_adapter_score_kind": "length_normalized_conditional_logprob"
+  },
+  "search": {
+    "global_beam": true,
+    "beam_widths_for_future_comparison": [1, 3, 5],
+    "default_max_expansions": 40,
+    "default_max_actions_per_state": 4,
+    "state_deduplication": "same observable model, graph, retrieval, and evidence state retains highest-scoring history",
+    "score": "sum of per-action normalized log scores",
+    "gold_correctness_in_scoring": false,
+    "hard_budget_stop": true,
+    "error_no_answer_or_exhaustion_is_success": false
+  },
+  "artifacts": {
+    "live_output": "exclusive-create append-only JSONL with node manifests, every expansion, and summary",
+    "synthetic_smoke": "examples/temporal_eval_v2/live_synthetic_multiroute_v22.json",
+    "synthetic_prebuilt_trajectory": false,
+    "synthetic_private_route_loaded_during_inference": false
+  },
+  "frozen_files": {
+    "src/tkg/experiment/temporal_live_ranker_v22.py": "2d5211b3b4400e8004c64d9f36f86346543111feda8d873ce11cefd5d4b84381",
+    "src/tkg/experiment/temporal_live_runner_v22.py": "72af88dbed98a1cc4814b4defa3d0d6f657d1869678293bf4a7063e3b2a15fd4",
+    "src/tkg/experiment/temporal_live_v22_synthetic.py": "bbe5769d0196410e9ef480862ff2af1c3e930c6eaf2e6969e5a0f1fca2af28ea",
+    "tests/test_temporal_live_runner_v22.py": "cc96d999e53ce02b81b7d24feaa83f6436f3687b6a5dd930d921d1e65299b2ce",
+    "examples/temporal_eval_v2/live_synthetic_multiroute_v22.json": "41dfdf9e2744995d1740f8dbc3469045cdabfeac6bdf64f2e2f025fa50ffe20d",
+    "src/tkg/experiment/temporal_environment_v2.py": "49a8cefe838e5bf5a3e147faea6874be7cc0d43338550c4f12d33914e60ffc66",
+    "src/tkg/experiment/temporal_evaluation_v2.py": "5b5335dc3b721fe522c9b7c5dabb7ab2ac19cc813559ddc51ddf60ac8fdd0389",
+    "src/tkg/experiment/temporal_submission_v2.py": "94c02b424f9e019555c1b18db28f0dc891657d242dcd55cf8809c87a8c7f2e56"
+  },
+  "engineering_smoke_result": {
+    "start_page": "Start",
+    "expansions": 7,
+    "action_kinds": [
+      "LIST_LINKS",
+      "FOLLOW_LINK",
+      "LIST_REVISIONS",
+      "SWITCH_SNAPSHOT",
+      "LIST_LINKS",
+      "FOLLOW_LINK",
+      "SUBMIT_ANSWER"
+    ],
+    "private_reference_route_completed": false,
+    "alternative_route_posthoc_validated": true,
+    "interpretation": "live runner engineering smoke passed; no model or benchmark claim"
+  },
+  "not_implemented_or_not_run": [
+    "fresh post-freeze development cases",
+    "fresh API model A/B/C/D runs",
+    "benchmark accuracy",
+    "human evidence review",
+    "open-weight graph-integrated decoding"
+  ]
+}

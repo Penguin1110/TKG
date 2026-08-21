@@ -1,0 +1,52 @@
+{
+  "schema_version": "candidate-topology-registry-v1",
+  "registry_version": "candidate-topologies-2026-08-15",
+  "direct_topology": {
+    "time_modes": ["interval", "either"],
+    "target_kind": "person",
+    "answer_kind": "Who"
+  },
+  "staged_topologies": [
+    {
+      "event_property_id": "P39",
+      "adapter": "p39_office_succession",
+      "required_relation_ids": ["P39", "P1308"]
+    },
+    {
+      "event_property_id": "P102",
+      "adapter": "mixed_leadership",
+      "required_relation_ids": ["P39", "P102"]
+    },
+    {
+      "event_property_id": "P108",
+      "adapter": "mixed_leadership",
+      "required_relation_ids": ["P39", "P108"]
+    },
+    {
+      "event_property_id": "P1416",
+      "adapter": "mixed_leadership",
+      "required_relation_ids": ["P39", "P1416"]
+    }
+  ],
+  "leadership_relation_ids": ["P169", "P488", "P1037", "P1308", "P6", "P35"],
+  "tails": [
+    {"property_id": "P21", "family": "identity", "question": "What is the sex or gender of the person identified in Step 3?"},
+    {"property_id": "P19", "family": "geography", "question": "What is the place of birth of the person identified in Step 3?"},
+    {"property_id": "P20", "family": "geography", "question": "What is the place of death of the person identified in Step 3?"},
+    {"property_id": "P26", "family": "family", "question": "Who is the spouse of the person identified in Step 3?"},
+    {"property_id": "P27", "family": "geography", "question": "What is the country of citizenship of the person identified in Step 3?"},
+    {"property_id": "P69", "family": "education", "question": "Which institution educated the person identified in Step 3?"},
+    {"property_id": "P106", "family": "career", "question": "What is the occupation of the person identified in Step 3?"},
+    {"property_id": "P108", "family": "affiliation", "question": "Which organization employs the person identified in Step 3?"},
+    {"property_id": "P101", "family": "career", "question": "What is the field of work of the person identified in Step 3?"},
+    {"property_id": "P103", "family": "language", "question": "What is the native language of the person identified in Step 3?"},
+    {"property_id": "P140", "family": "identity", "question": "What is the religion or worldview of the person identified in Step 3?"},
+    {"property_id": "P1412", "family": "language", "question": "What language is spoken by the person identified in Step 3?"},
+    {"property_id": "P166", "family": "awards", "question": "Which award has the person identified in Step 3 received?"},
+    {"property_id": "P551", "family": "geography", "question": "What is the residence of the person identified in Step 3?"},
+    {"property_id": "P735", "family": "name", "question": "What is the given name of the person identified in Step 3?"},
+    {"property_id": "P734", "family": "name", "question": "What is the family name of the person identified in Step 3?"},
+    {"property_id": "P800", "family": "works", "question": "What is a notable work of the person identified in Step 3?"},
+    {"property_id": "P937", "family": "geography", "question": "What is the work location of the person identified in Step 3?"}
+  ]
+}

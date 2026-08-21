@@ -144,8 +144,14 @@ def _temporal_tools(
         "parameters": {
             "type": "object",
             "properties": {
-                "from": {"type": "string", "format": "date", "minimum": revision_start},
-                "to": {"type": "string", "format": "date", "maximum": revision_end},
+                "from": {
+                    "type": "string", "format": "date",
+                    "description": f"Start date, no earlier than {revision_start}.",
+                },
+                "to": {
+                    "type": "string", "format": "date",
+                    "description": f"End date, no later than {revision_end}.",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
             },
             "required": ["from", "to", "limit"],

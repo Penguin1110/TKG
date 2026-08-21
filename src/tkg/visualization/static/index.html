@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>TKG Trajectory Atlas</title>
-  <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
   <main id="app">
@@ -32,6 +32,20 @@
         <label>Trajectory<select id="trajectory-select"><option value="">Select a run…</option></select></label>
         <div id="run-badges" class="badges" aria-live="polite"></div>
         <label class="check"><input id="show-stubs" type="checkbox" checked> Show unresolved linked pages</label>
+      </section>
+
+      <section class="diagnosis" aria-live="polite">
+        <h2>Question &amp; diagnosis</h2>
+        <div id="empty-diagnosis" class="empty">Select a trajectory to see its question, expected route, answer, and failure.</div>
+        <div id="run-diagnosis" hidden>
+          <div class="diagnosis-block"><strong>Question</strong><p id="diagnosis-question"></p></div>
+          <div class="diagnosis-grid">
+            <div><strong>Correct answer</strong><p id="diagnosis-expected"></p></div>
+            <div><strong>Model answer</strong><p id="diagnosis-model-answer"></p></div>
+          </div>
+          <div class="diagnosis-block"><strong>Required route</strong><ol id="diagnosis-route"></ol></div>
+          <div class="diagnosis-block failure"><strong>What went wrong</strong><p id="diagnosis-failure"></p></div>
+        </div>
       </section>
 
       <section class="details" aria-live="polite">
@@ -113,6 +127,6 @@
     <strong>Visualization could not load</strong>
     <pre id="fatal-message"></pre>
   </div>
-  <script src="app.js"></script>
+    <script src="app.js?v=6"></script>
 </body>
 </html>

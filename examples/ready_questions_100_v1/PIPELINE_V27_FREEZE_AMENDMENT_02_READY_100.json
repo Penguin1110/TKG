@@ -1,0 +1,50 @@
+{
+  "schema_version": "ready-100-completion-manifest-v2.7",
+  "created_at": "2026-08-20T06:49:11Z",
+  "status": "complete_machine_pass_pk_admitted",
+  "human_review": "waived_by_user_not_performed",
+  "final_artifact": {
+    "path": "examples/ready_questions_100_v1/READY_100_CASES_V2.json",
+    "sha256": "9ea0b91cc13262d391bf0fcf0be9a27e7d8c1a52e0f88cf4dbadebd980528dc2",
+    "count": 100,
+    "unique_case_ids": 100,
+    "unique_public_questions": 100
+  },
+  "report": {
+    "path": "docs/READY_100_V27_RESULT.md",
+    "sha256": "eeb527fd8cbcc3b61578ba9747e75debc185adf9f0ccf94e3a589638f1a19aa7"
+  },
+  "frozen_source_hashes": {
+    "ready_candidate_curation_v27": "102238411ed5a5fa90d42ac1ce1c55754909379c31e4b49b33bc4a6427b22421",
+    "candidate_seed_promotion": "821c4abaae806c44666450186ed191e5d1d125a7e6fae22fb44c2eb06bbec69c",
+    "certified_spine_tail_expansion_v27": "5128694ae32e41027541b1df64b421d19491af997f8abd2ddd471b85503d930a",
+    "spine_pk_reuse_v27": "781449c898e360dcc2070adc0cb6ff53b0d672f870403e4622ebe55c615ef4a6"
+  },
+  "admission_artifacts": {
+    "mapping": {
+      "path": "examples/ready_questions_100_v1/v27_pk_mapping_final_pool_v2.json",
+      "sha256": "ffdcc02b73e6991fb80b21579fa64c6cf3cb35e85fd04eea33857b8a6e642fdd"
+    },
+    "ledger": {
+      "path": "examples/ready_questions_100_v1/v27_pk_reuse_ledger_final_pool_v2.jsonl",
+      "sha256": "ab11652b8fa440e874f30cb6525b00f51a8c105cf9389b32e515650e9d3dfe26"
+    }
+  },
+  "verification": {
+    "focused_tests": "36 passed",
+    "pyflakes": "passed",
+    "compileall": "passed"
+  },
+  "known_limitations": [
+    "96 of 100 cases have sports domain label",
+    "human evidence review not performed",
+    "engineering set only; not a formal benchmark result"
+  ],
+  "retained_failures": [
+    "v27_validation_extended_b pending_process_error shard retained append-only"
+  ],
+  "stopped_unused_jobs": [
+    "promotion_004",
+    "promotion_005"
+  ]
+}

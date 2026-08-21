@@ -1,0 +1,41 @@
+{
+  "schema_version": "ready-question-pipeline-freeze-v2.7",
+  "frozen_at": "2026-08-20T02:08:00+08:00",
+  "status": "pipeline_implemented_live_runs_stopped",
+  "source_hashes": {
+    "ready_candidate_curation_v27.py": "08a494a01665dde50de80d4c960ed99ea1a9fc5b2b51c3a06130ca237044c0ee",
+    "certified_spine_tail_expansion_v27.py": "836b7abcefd8ee8517fa495a6ac10f84dcffab90dcb2706be32c05de78e85c81",
+    "spine_pk_reuse_v27.py": "6797641ecf7e498b5aa62ccb3ece49921758d8b2ae45651d2dad7f1b21c628c1",
+    "resumable_machine_validation_v24.py": "892f8df2f4977073993c523348101e3cde34cda3c9e6657970877ab56c3274d9",
+    "candidate_question_batch.py": "3384bed868f8435b8f9f77384deb02da6d42938c899bc7b239b183041ed27d4e",
+    "READY_QUESTION_PIPELINE_V2_7.md": "a613d2846fcdfe3120882420377a303ff894f255231b99c9900f36956adb0b5a"
+  },
+  "artifact_hashes": {
+    "promotion_000/promoted_seeds.json": "f701c0061556b6031dfea7ccc19d6b2f8817d8e0bea67b95f6bff4c3cf6c89f0",
+    "certified_tail_expansion_000.json": "b0e4dac6d75418611c52e12af41381c2ad70c722be6d7ef9d8d260f6737bf1e8"
+  },
+  "engineering_counts": {
+    "fresh_candidate_questions": 875,
+    "fresh_unique_spines": 160,
+    "screened_unique_spines": 20,
+    "certified_spines": 3,
+    "additional_tail_candidates_checked": 19,
+    "additional_tail_seeds_promoted": 10,
+    "machine_pass": 1,
+    "pk_admitted": 0,
+    "pk_pending": 1,
+    "ready_questions": 0
+  },
+  "tests": {
+    "targeted_pytest": "23 passed",
+    "pyflakes": "pass",
+    "mypy": "pass"
+  },
+  "running_live_processes": 0,
+  "resume_authorized": false,
+  "notes": [
+    "The interrupted PK call is pending, not rejected.",
+    "No claim of a 100-question ready set is made.",
+    "Future live execution should use v2.5 validation with --skip-pk, then spine_pk_reuse_v27."
+  ]
+}

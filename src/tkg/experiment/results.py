@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,9 +29,11 @@ class JsonlResultStore:
         self.path = path
         self.metadata = dict(metadata or {})
         self._fh = open(path, "a", encoding="utf-8")
+        self._lock = threading.Lock()
 
     def close(self):
-        self._fh.close()
+        with self._lock:
+            self._fh.close()
 
     def write(self, *, slot: str, case_id: str, model: str, arm: str, **fields):
         row = {
@@ -39,8 +42,10 @@ class JsonlResultStore:
             "slot": slot, "case_id": case_id, "model": model, "arm": arm,
             **self.metadata, **fields,
         }
-        self._fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        self._fh.flush()
+        encoded = json.dumps(row, ensure_ascii=False) + "\n"
+        with self._lock:
+            self._fh.write(encoded)
+            self._fh.flush()
 
     @staticmethod
     def completed(path: str, contract_hash: str | None = None) -> set[tuple]:

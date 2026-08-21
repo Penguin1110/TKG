@@ -1,0 +1,49 @@
+{
+  "schema_version": "temporal-search-contract-freeze-v1",
+  "frozen_at": "2026-08-15",
+  "status": "frozen_development_contract",
+  "semantic_contract_sha256": "55e5b583aaab7d1e70838f08f9c46babcfa3e21bbb28e2485b16b26057e88600",
+  "contract": {
+    "compaction": "visible_document_order_first_n_reserving_nonlink_actions_v1",
+    "max_dense_actions": 30,
+    "ranker_contract": "exact_action_id_set_finite_numeric_minus100_to100_retry_once_then_fail_closed",
+    "missing_action": "ranker_contract_error_no_floor",
+    "answer_contract": "one_entity_or_short_noun_phrase_max_8_words_literal_visible_evidence_gate",
+    "development_cases": [
+      "promoted_2f6b33fae25397dbdb23",
+      "promoted_65a09264c491e3505268"
+    ]
+  },
+  "implementation_parameters": {
+    "forced_diagnostic": {
+      "policy": "visible_document_order_first_n_reserving_nonlink_actions_v1",
+      "total_action_limit": 30
+    },
+    "end_to_end_beam_default": {
+      "policy": "backend_render_order_first_n_links_v1",
+      "max_links": 20,
+      "revision_limit": 8,
+      "answer_candidates_per_state": 1,
+      "dense_ranker_total_action_limit": 30,
+      "note": "This is frozen as implemented and is not identical to the forced-diagnostic compaction parameterization."
+    }
+  },
+  "development_only": {
+    "cases_must_not_drive_further_tuning": true,
+    "formal_accuracy_allowed": false,
+    "forced_state_result": "FORCED_STATE_SEARCH_INTERFACE_SMOKE_PASSED",
+    "end_to_end_result": "NOT_TESTED"
+  },
+  "sha256": {
+    "src/tkg/experiment/temporal_beam.py": "1d817d9c4583d41dba98725a03b57bca7f23b2fa4a988da9ecb4ae694b056713",
+    "src/tkg/experiment/temporal_beam_ranker.py": "270abd3eeb0b348085a5ed71cd452921c420b078bb58f5524294cbb9317777d9",
+    "src/tkg/experiment/temporal_beam_diagnostics.py": "e0fc93fc5294d0678714cceaa55c0889b07b5f411a149efe02e87621cd7e18b9",
+    "examples/temporal_beam_new_questions_v1/generated_cases_v4.json": "3fa140760ee8e4715878298d82854e0aea6c5f5b3c9a6082235488ecfbb51b4f",
+    "examples/temporal_beam_new_questions_v1/canada_generated_cases.json": "cdf06c82a21ef495de2d018a56741b65c569afc9c1ee52f164eb69ea9eb58470",
+    "examples/temporal_beam_new_questions_v1/forced_diagnostics_compaction_v5.jsonl": "3fe3913120c953c04181ff450f71db49c4d852211f4042800e17c516e3d9fa53"
+  },
+  "canonical_case_sha256": {
+    "promoted_2f6b33fae25397dbdb23": "514f90d82a74c98bab0a467a2336349be02a10ac5ab5078d464ce75056ea9a53",
+    "promoted_65a09264c491e3505268": "ab901ceafc648c864e1fb437a8d0cebb12a78510f399e3420929fa1cfb8ccd72"
+  }
+}

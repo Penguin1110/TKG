@@ -115,8 +115,8 @@
       "answer_kind": "What",
       "relative_clause": "the position held by {source}",
       "selection_policy": "latest_start",
-      "later_relative_clause": "the next position held by {source} after that",
-      "inverse_relative_clause": "the next person to hold {source}",
+      "later_relative_clause": "the first position {source} began holding after the preceding event boundary",
+      "inverse_relative_clause": "the next person to begin holding {source} after the previous tenure began",
       "inverse_answer_kind": "Who",
       "status": "bootstrap"
     },

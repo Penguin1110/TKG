@@ -1,0 +1,263 @@
+{
+  "schema_version": "spine-factorized-pk-reuse-v2.7",
+  "created_at": "2026-08-20T06:47:29.350915+00:00",
+  "admission_basis": "critical_bridge_only",
+  "tail_or_composed_correctness_controls_admission": false,
+  "spine_count": 16,
+  "case_count": 93,
+  "groups": [
+    {
+      "spine_certificate_sha256": "018c89f9861b811620ad5388576a49eeca2604f4cd1793774d03bb801b500462",
+      "critical_probe_contract_sha256": "472c9b7cdda9e44eab56140fb0fcdf10d86ba0c5152ca96e945324565aa47536",
+      "representative_case_id": "promoted_6e3da2f714499fc6ae0d",
+      "member_case_ids": [
+        "promoted_6e3da2f714499fc6ae0d",
+        "linkedtail_2b4743ea50aeb8a3",
+        "linkedtail_7fed39a5310b585d",
+        "linkedtail_961369bc303c2153",
+        "promoted_fe2e9a4b71fffa6438da"
+      ],
+      "member_count": 5,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "06818551023e638fd222ac9881780f1d74261518cf1ab941b64a04287f809084",
+      "critical_probe_contract_sha256": "5edfe09952cb9e5a1aa89272385ee72131dbaa50d6515a16b75a537007340898",
+      "representative_case_id": "promoted_e1b0c44f3420d027d0f7",
+      "member_case_ids": [
+        "promoted_e1b0c44f3420d027d0f7"
+      ],
+      "member_count": 1,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "10d2585e7aec16cec23121b6400c58761f0a8f8d276a4aba1616e73f1efc8c0a",
+      "critical_probe_contract_sha256": "aff631d3fd89c0ac053460e30f03fbdcbf087cd0519be519b90e1cd05513e140",
+      "representative_case_id": "promoted_5592702c18e50cc280b8",
+      "member_case_ids": [
+        "promoted_5592702c18e50cc280b8",
+        "linkedtail_276b5a0ec74697a0",
+        "linkedtail_8b9d3a5cd03027b3",
+        "linkedtail_a437ecdb225e72b4",
+        "linkedtail_bdeb3838ee26f095",
+        "linkedtail_c39eb71c566bba1c",
+        "linkedtail_cd81e82b7872fd0e",
+        "linkedtail_ed091dec909e8478",
+        "promoted_b82d93e315b706d7270b_p19"
+      ],
+      "member_count": 9,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "1ed09a32a11a8566256b69beda2b03b5d4dca5e5894399a36059eb73fbf156c1",
+      "critical_probe_contract_sha256": "e68f157aa7df029e161c0772a3416b8582b5c4d9345123e2e51dca156033f46d",
+      "representative_case_id": "promoted_110e656e39367611125a_p106",
+      "member_case_ids": [
+        "promoted_110e656e39367611125a_p106",
+        "linkedtail_0a59027db3ed200b",
+        "linkedtail_1a42318f683d0320",
+        "linkedtail_481ffea882326d6d",
+        "linkedtail_5df5f408529ed539",
+        "linkedtail_7552e619552f0a2e",
+        "linkedtail_a5e9be7b91dccf42",
+        "linkedtail_b0225f953548e56d",
+        "linkedtail_df6f1f622cd59558",
+        "promoted_787fa611d477ae8f8ab8"
+      ],
+      "member_count": 10,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "24d6e1a43ce8bbe2899c5f4a458bf73627812f70dba98f0e24052540ad534186",
+      "critical_probe_contract_sha256": "d318d8a49da4f516e33ec6190689c17bf1d920763f5d4e57f0fa1f97af6f5b1c",
+      "representative_case_id": "promoted_55faa4489bb7ec2a4aef_p19",
+      "member_case_ids": [
+        "promoted_55faa4489bb7ec2a4aef_p19"
+      ],
+      "member_count": 1,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "3f14fa224b77fb423a7db76d4aabf38b70b0799b75af7d6db0052050d68c0c7a",
+      "critical_probe_contract_sha256": "7f0b8a11dcc6ee78c5ee834b0285d6ce96f1da8404e9f24d2723c0d868797364",
+      "representative_case_id": "promoted_6d79b4eed2c93558fdd1_p106",
+      "member_case_ids": [
+        "promoted_6d79b4eed2c93558fdd1_p106",
+        "linkedtail_094b094d93a17493",
+        "linkedtail_09a45d99edc9b3db",
+        "linkedtail_1669149ca367f3ab",
+        "linkedtail_3c4af36b06af606f",
+        "linkedtail_43c598a329587f76",
+        "linkedtail_4c95766c206566ec",
+        "linkedtail_68d91c51e3a228b9",
+        "linkedtail_73b6b5ad03bd6988",
+        "linkedtail_7a1ee0746656d82f",
+        "linkedtail_8b7e327301e95d7f",
+        "linkedtail_9030d26c5e27abf7",
+        "linkedtail_9956bf98a056631e",
+        "linkedtail_aed0f6d2e715eb13",
+        "linkedtail_d31ad14781db87ae",
+        "linkedtail_fb0d72b96a5ede8a",
+        "promoted_bc8293ce6e8cee7057ef",
+        "promoted_c09cb07442bda515c228"
+      ],
+      "member_count": 18,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "4e494030108dd9b00c78e6fb547c2dc1d6ab884bdd260b350f8d5ec4265c05c1",
+      "critical_probe_contract_sha256": "a58d0b2ae81caceb1a9b018e84af31190ca5cac4012b38ba6784256bdeceb43d",
+      "representative_case_id": "linkedtail_68a4101802d97657",
+      "member_case_ids": [
+        "linkedtail_68a4101802d97657",
+        "promoted_87b4abab5cd1cb389a83",
+        "promoted_ffcd512c85d09953d77b_p106"
+      ],
+      "member_count": 3,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "52f59ab8d8925154851f7d2c16f6c242002b62bbdaf5345414ef46d6edbe39a6",
+      "critical_probe_contract_sha256": "829877a235c3767271ca5ad6c70a31d5128e487c71cc2f110febc727f29a9f9b",
+      "representative_case_id": "linkedtail_a04f825bbeb2bf57",
+      "member_case_ids": [
+        "linkedtail_a04f825bbeb2bf57",
+        "promoted_d3ba9e83fa5c6d68a8a9",
+        "promoted_de330dbdfeceeb0d6c51_p106"
+      ],
+      "member_count": 3,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "5c7a19a247b0e5803bf4ffa0e9b1fbd95668a8abc91c590c933a2c8eac7b9dc3",
+      "critical_probe_contract_sha256": "beb4688c6c8822b3df1bc808cee87ad1c7082c2543771f552799184872c4bf13",
+      "representative_case_id": "promoted_b020a5d596fb16ac596f_p19",
+      "member_case_ids": [
+        "promoted_b020a5d596fb16ac596f_p19",
+        "promoted_cb0f64cf5ef26803d421"
+      ],
+      "member_count": 2,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "8f2c2ef640ea3f1ac737d136472294dd42db967f92dff4a0ce428d9d0765cbb0",
+      "critical_probe_contract_sha256": "a2949654fb690dff6807d880b24eff036d46dd3db27210b62d0abe370beea357",
+      "representative_case_id": "promoted_774d3319893504ffd41a",
+      "member_case_ids": [
+        "promoted_774d3319893504ffd41a",
+        "linkedtail_58426c6b73713f95",
+        "linkedtail_6689b12bcb43b2b4",
+        "linkedtail_bc84934c74f0d52d",
+        "linkedtail_defd82412067e250",
+        "promoted_7c62529929427ae81686",
+        "promoted_bfb00e42bc5ef5fc6da6",
+        "promoted_e452fb2f8883b2a65831"
+      ],
+      "member_count": 8,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "a524231015eb123c1e61a9a6d3db61c76948e072958b8f75d77e410344106cfc",
+      "critical_probe_contract_sha256": "40858fcae11457bb5bf91f153582555e4f78f7ebf7244a6d955520d70b709dac",
+      "representative_case_id": "promoted_449b73a20aa7e4325383",
+      "member_case_ids": [
+        "promoted_449b73a20aa7e4325383",
+        "linkedtail_1f0ef9bd15147278",
+        "linkedtail_3bc2e54bee8ef377",
+        "linkedtail_4861f4d9c26244c3",
+        "linkedtail_d1a7a8b55890922f",
+        "linkedtail_da8fd53cacac30de",
+        "linkedtail_dd445731802039f7",
+        "linkedtail_e13fabc25f8954e0",
+        "linkedtail_fe481333a2fbb919",
+        "promoted_bd251860848ba3be7243_p106"
+      ],
+      "member_count": 10,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "a62d813dec7bec2d167c68692456b68759c274ff1eb0ac83d522323d95f7cabb",
+      "critical_probe_contract_sha256": "9d405efbd5ccc70f31a9708b1740d95b28463e20ceaa093b086d4e4323c4e790",
+      "representative_case_id": "promoted_056d1de10792065de338",
+      "member_case_ids": [
+        "promoted_056d1de10792065de338",
+        "linkedtail_66cb0c3b96faa993",
+        "promoted_e81bce1d670ea6288c16_p19"
+      ],
+      "member_count": 3,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "a691e41b06aba97552125c63486f99a5f496d9f8bbb0226c3c2c87c33e1e7c07",
+      "critical_probe_contract_sha256": "d1046636de50952cbcf5c63088e131838ade6ca4db1c1f6db3be2f7f3d927314",
+      "representative_case_id": "promoted_3576457ff21c415d4138",
+      "member_case_ids": [
+        "promoted_3576457ff21c415d4138",
+        "linkedtail_5c6b39a8bc4c85cf",
+        "linkedtail_5db2301c29950f2b",
+        "linkedtail_700c85f527d2f8c8",
+        "linkedtail_7707d486df7b5394",
+        "promoted_8e28f067ac4b4c4ad65c_p106"
+      ],
+      "member_count": 6,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "af77f2e0d55065e9915172c87e74d692f4ba0e4ed472b5bec89ce4c6a5b62b3a",
+      "critical_probe_contract_sha256": "ceb6f9ad9ca313d3cb8919b412c6ec8fd5e100b29583d972caa28deb160c44f8",
+      "representative_case_id": "promoted_8f4eb912f8fa58eac496",
+      "member_case_ids": [
+        "promoted_8f4eb912f8fa58eac496",
+        "linkedtail_54f903856879ab3b",
+        "linkedtail_71b0250a3ada4faa",
+        "linkedtail_a42f2ab77a5e5296",
+        "linkedtail_d3e2ed9448fab9a5",
+        "linkedtail_f1cff43c192f14c4",
+        "promoted_b9b0d19013410b35a02c_p19"
+      ],
+      "member_count": 7,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "e01b7e3e1026c9bab1c819784da1dcd992c2a07eb8181520125bc8e9c618f936",
+      "critical_probe_contract_sha256": "ab9b273b23f6b09aae42e5205c52406b6053caa44438819d7cecc3650b4a29b0",
+      "representative_case_id": "promoted_4c7ad3721f8314761b99_p106",
+      "member_case_ids": [
+        "promoted_4c7ad3721f8314761b99_p106",
+        "linkedtail_18862b75f5204247",
+        "linkedtail_2164636c5b282812",
+        "linkedtail_644232f93845b274",
+        "linkedtail_8cc7cfd5f5396096",
+        "promoted_bf460fe5836db810ee95"
+      ],
+      "member_count": 6,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    },
+    {
+      "spine_certificate_sha256": "fc37b1a41cfaadef7293dd79319dbc6b0e500b95840fd740afdaa00c29fefecf",
+      "critical_probe_contract_sha256": "560741e57cbcacd318ef8271c9c8b4a47e10c56f1eaa27067391e3ee37f61767",
+      "representative_case_id": "promoted_3a8467a79c09cf83f6c7_p19",
+      "member_case_ids": [
+        "promoted_3a8467a79c09cf83f6c7_p19"
+      ],
+      "member_count": 1,
+      "model_id": "openai/gpt-4.1-mini",
+      "cutoff_date": "2024-06-01"
+    }
+  ]
+}

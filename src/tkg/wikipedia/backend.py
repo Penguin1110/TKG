@@ -9,11 +9,14 @@ and cached pages.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from typing import Callable
 from urllib.parse import unquote, urlparse
@@ -28,6 +31,24 @@ DEFAULT_USER_AGENT = "TKG-Wikipedia-Browser/1.0 (research; contact: local-user)"
 
 class WikipediaError(RuntimeError):
     pass
+
+
+class WikimediaRequestThrottle:
+    """Process-local aggregate throttle shared by concurrent API workers."""
+
+    def __init__(self, min_interval: float = 0.1):
+        if min_interval < 0:
+            raise ValueError("min_interval must be >= 0")
+        self.min_interval = min_interval
+        self._last_request = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last_request = time.monotonic()
 
 
 def normalize_title(title: str) -> str:
@@ -146,6 +167,12 @@ class WikipediaPageBackend:
         user_agent: str = DEFAULT_USER_AGENT,
         min_request_interval: float = 0.1,
         request_get: Callable | None = None,
+        request_throttle: WikimediaRequestThrottle | None = None,
+        max_api_calls: int | None = None,
+        api_max_retries: int = 6,
+        backoff_base_seconds: float = 2.0,
+        backoff_max_seconds: float = 60.0,
+        backlink_verify_workers: int = 1,
     ):
         self.lang = lang
         self.offline_only = offline_only
@@ -153,9 +180,28 @@ class WikipediaPageBackend:
         self.api_url = f"https://{lang}.wikipedia.org/w/api.php"
         self.wikidata_url = "https://www.wikidata.org/w/api.php"
         self.min_request_interval = min_request_interval
-        self._last_request = 0.0
+        self._request_throttle = request_throttle or WikimediaRequestThrottle(
+            min_request_interval
+        )
         self._request_get = request_get or requests.get
-        self._conn = sqlite3.connect(cache_path)
+        if max_api_calls is not None and max_api_calls <= 0:
+            raise ValueError("max_api_calls must be > 0 when provided")
+        if api_max_retries <= 0:
+            raise ValueError("api_max_retries must be > 0")
+        if backoff_base_seconds < 0 or backoff_max_seconds < 0:
+            raise ValueError("API backoff values must be >= 0")
+        if backlink_verify_workers <= 0:
+            raise ValueError("backlink_verify_workers must be > 0")
+        self.max_api_calls = max_api_calls
+        self.api_max_retries = api_max_retries
+        self.backoff_base_seconds = backoff_base_seconds
+        self.backoff_max_seconds = backoff_max_seconds
+        self.backlink_verify_workers = backlink_verify_workers
+        self._api_calls_used = 0
+        self._api_counter_lock = threading.Lock()
+        self._conn = sqlite3.connect(cache_path, timeout=30)
+        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS page_cache ("
             "cache_key TEXT PRIMARY KEY, title TEXT NOT NULL, as_of TEXT NOT NULL, "
@@ -182,24 +228,55 @@ class WikipediaPageBackend:
             "to_date TEXT NOT NULL, dates_json TEXT NOT NULL, fetched_at TEXT NOT NULL, "
             "PRIMARY KEY(lang,title_folded,from_date,to_date))"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS revision_metadata_page_cache ("
+            "cache_key TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS backlink_candidate_cache ("
+            "lang TEXT NOT NULL, target_folded TEXT NOT NULL, max_results INTEGER NOT NULL, "
+            "candidates_json TEXT NOT NULL, fetched_at TEXT NOT NULL, "
+            "PRIMARY KEY(lang,target_folded,max_results))"
+        )
         self._conn.commit()
 
     def close(self):
         self._conn.close()
 
-    def _api_get(self, url: str, params: dict, max_retries: int = 4) -> dict:
+    def request_stats(self) -> dict[str, int | None]:
+        return {
+            "api_calls_used": self._api_calls_used,
+            "api_call_budget": self.max_api_calls,
+            "api_calls_remaining": (
+                None if self.max_api_calls is None
+                else max(0, self.max_api_calls - self._api_calls_used)
+            ),
+        }
+
+    def _reserve_api_call(self) -> None:
+        with self._api_counter_lock:
+            if (
+                self.max_api_calls is not None
+                and self._api_calls_used >= self.max_api_calls
+            ):
+                raise WikipediaError(
+                    "Wikimedia API call budget exhausted: "
+                    f"used={self._api_calls_used}:budget={self.max_api_calls}"
+                )
+            self._api_calls_used += 1
+
+    def _api_get(self, url: str, params: dict, max_retries: int | None = None) -> dict:
         if self.offline_only:
             raise WikipediaError("offline_only=True，禁止即時呼叫 Wikimedia API")
+        retries = self.api_max_retries if max_retries is None else max_retries
         last_error = None
-        for attempt in range(1, max_retries + 1):
-            elapsed = time.time() - self._last_request
-            if elapsed < self.min_request_interval:
-                time.sleep(self.min_request_interval - elapsed)
+        for attempt in range(1, retries + 1):
+            self._request_throttle.wait()
             try:
+                self._reserve_api_call()
                 response = self._request_get(
                     url, params=params, headers={"User-Agent": self.user_agent}, timeout=30
                 )
-                self._last_request = time.time()
                 if response.status_code == 429 or response.status_code >= 500:
                     raise requests.HTTPError(f"HTTP {response.status_code}")
                 response.raise_for_status()
@@ -211,8 +288,18 @@ class WikipediaPageBackend:
                 raise
             except Exception as exc:  # network/rate-limit only
                 last_error = exc
-                if attempt < max_retries:
-                    time.sleep(2 ** attempt)
+                if attempt < retries:
+                    retry_after = 0.0
+                    headers = getattr(locals().get("response"), "headers", {})
+                    try:
+                        retry_after = float(headers.get("Retry-After", 0))
+                    except (TypeError, ValueError, AttributeError):
+                        retry_after = 0.0
+                    exponential = self.backoff_base_seconds * (2 ** (attempt - 1))
+                    time.sleep(min(
+                        self.backoff_max_seconds,
+                        max(retry_after, exponential),
+                    ))
         raise WikipediaError(f"Wikimedia API 呼叫失敗：{last_error}")
 
     def _cache_key(self, title: str, as_of: str | None) -> str:
@@ -342,6 +429,159 @@ class WikipediaPageBackend:
         )
         self._store(title, page)
         return page
+
+    def _fetch_page_network_only(
+        self, title: str, as_of: str | None,
+    ) -> PageSnapshot | None:
+        """Fetch without SQLite access so independent candidates can run in threads."""
+        try:
+            resolved, page_id, revision_id, timestamp = self._resolve_revision(
+                title, as_of,
+            )
+            parsed_title, html, allowed = self._parse_revision(revision_id)
+            parser = _VisiblePageParser(allowed)
+            parser.feed(html)
+            content, links = parser.result()
+            canonical = normalize_title(parsed_title or resolved)
+            return PageSnapshot(
+                title=canonical, page_id=page_id, revision_id=revision_id,
+                timestamp=timestamp, as_of=as_of, content=content, links=links,
+                source_url=f"https://{self.lang}.wikipedia.org/?oldid={revision_id}",
+            )
+        except WikipediaError:
+            return None
+
+    def fetch_revision(self, revision_id: int, refresh: bool = False) -> PageSnapshot:
+        """Fetch one exact immutable revision for the v2 graph environment."""
+        if isinstance(revision_id, bool) or int(revision_id) <= 0:
+            raise ValueError("revision_id must be a positive integer")
+        revision_id = int(revision_id)
+        metadata_key = f"{self.lang}|exact-revision|{revision_id}"
+        cached_metadata = self._conn.execute(
+            "SELECT data FROM revision_metadata_page_cache WHERE cache_key=?",
+            (metadata_key,),
+        ).fetchone()
+        metadata = None if refresh or not cached_metadata else json.loads(
+            cached_metadata[0]
+        )
+        if metadata is None:
+            data = self._api_get(self.api_url, {
+                "action": "query", "format": "json", "formatversion": "2",
+                "revids": str(revision_id), "prop": "revisions",
+                "rvprop": "ids|timestamp",
+            })
+            pages = data.get("query", {}).get("pages", [])
+            revisions = pages[0].get("revisions", []) if pages else []
+            if not pages or pages[0].get("missing") or not revisions:
+                raise WikipediaError(f"Wikipedia 找不到 revision：{revision_id}")
+            metadata = {
+                "title": str(pages[0]["title"]),
+                "page_id": int(pages[0]["pageid"]),
+                "revision_id": int(revisions[0]["revid"]),
+                "timestamp": str(revisions[0]["timestamp"]),
+            }
+            self._conn.execute(
+                "INSERT OR REPLACE INTO revision_metadata_page_cache("
+                "cache_key,data,fetched_at) VALUES(?,?,?)",
+                (
+                    metadata_key, json.dumps(metadata, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+        parsed = None if refresh else self._load_parsed_revision(revision_id)
+        if parsed is None:
+            parsed_title, html, allowed = self._parse_revision(revision_id)
+            parser = _VisiblePageParser(allowed)
+            parser.feed(html)
+            content, links = parser.result()
+            title = normalize_title(parsed_title or str(metadata["title"]))
+            self._store_parsed_revision(revision_id, title, content, links)
+        else:
+            title, content, links = parsed
+        return PageSnapshot(
+            title=title,
+            page_id=int(metadata["page_id"]),
+            revision_id=revision_id,
+            timestamp=str(metadata["timestamp"]),
+            as_of=str(metadata["timestamp"]),
+            content=content,
+            links=links,
+            source_url=f"https://{self.lang}.wikipedia.org/?oldid={revision_id}",
+        )
+
+    def list_revision_metadata_page(
+        self,
+        title: str,
+        from_date: str,
+        to_date: str,
+        *,
+        cursor: str | None = None,
+        page_size: int = 50,
+    ) -> dict:
+        """Return one reproducible MediaWiki revision page without sampling."""
+        start = self._strict_date(from_date, "from")
+        end = self._strict_date(to_date, "to")
+        if start > end:
+            raise ValueError("from must not be after to")
+        if isinstance(page_size, bool) or not 1 <= int(page_size) <= 500:
+            raise ValueError("page_size must be an integer from 1 through 500")
+        page_size = int(page_size)
+        key_payload = {
+            "lang": self.lang,
+            "title": normalize_title(title).casefold(),
+            "from": start,
+            "to": end,
+            "cursor": cursor,
+            "page_size": page_size,
+        }
+        cache_key = "revision-page|" + hashlib.sha256(json.dumps(
+            key_payload, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        cached = self._conn.execute(
+            "SELECT data FROM revision_metadata_page_cache WHERE cache_key=?",
+            (cache_key,),
+        ).fetchone()
+        if cached:
+            return json.loads(cached[0])
+        params = {
+            "action": "query", "format": "json", "formatversion": "2",
+            "redirects": "1", "titles": normalize_title(title),
+            "prop": "revisions", "rvprop": "ids|timestamp",
+            "rvlimit": str(page_size), "rvdir": "newer",
+            "rvstart": f"{start}T00:00:00Z", "rvend": f"{end}T23:59:59Z",
+        }
+        if cursor:
+            params["rvcontinue"] = cursor
+        data = self._api_get(self.api_url, params)
+        pages = data.get("query", {}).get("pages", [])
+        if not pages or pages[0].get("missing"):
+            raise WikipediaError(f"Wikipedia 找不到頁面：{title}")
+        result = {
+            "title": str(pages[0]["title"]),
+            "from_date": start,
+            "to_date": end,
+            "cursor": cursor,
+            "next_cursor": data.get("continue", {}).get("rvcontinue"),
+            "revisions": [
+                {
+                    "revision_id": int(row["revid"]),
+                    "parent_id": int(row.get("parentid") or 0),
+                    "timestamp": str(row["timestamp"]),
+                }
+                for row in pages[0].get("revisions", [])
+            ],
+        }
+        self._conn.execute(
+            "INSERT OR REPLACE INTO revision_metadata_page_cache("
+            "cache_key,data,fetched_at) VALUES(?,?,?)",
+            (
+                cache_key, json.dumps(result, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return result
 
     @staticmethod
     def _strict_date(value: str, field: str) -> str:
@@ -524,32 +764,87 @@ class WikipediaPageBackend:
         if self.offline_only:
             return cached[:max_results]
 
-        candidates: list[str] = []
-        continuation = None
-        while len(candidates) < max_results:
-            params = {
-                "action": "query", "format": "json", "formatversion": "2",
-                "list": "backlinks", "bltitle": normalize_title(title), "blnamespace": "0",
-                "bllimit": str(min(500, max_results * 3)),
-            }
-            if continuation:
-                params["blcontinue"] = continuation
-            data = self._api_get(self.api_url, params)
-            candidates.extend(item["title"] for item in data.get("query", {}).get("backlinks", []))
-            continuation = data.get("continue", {}).get("blcontinue")
-            if not continuation:
-                break
-
         target_folded = normalize_title(title).casefold()
+        candidate_row = self._conn.execute(
+            "SELECT candidates_json FROM backlink_candidate_cache "
+            "WHERE lang=? AND target_folded=? AND max_results=?",
+            (self.lang, target_folded, max_results),
+        ).fetchone()
+
+        if candidate_row:
+            candidates = list(json.loads(candidate_row[0]))
+        else:
+            candidates = []
+            continuation = None
+            while len(candidates) < max_results:
+                params = {
+                    "action": "query", "format": "json", "formatversion": "2",
+                    "list": "backlinks", "bltitle": normalize_title(title),
+                    "blnamespace": "0", "bllimit": str(min(500, max_results * 3)),
+                }
+                if continuation:
+                    params["blcontinue"] = continuation
+                data = self._api_get(self.api_url, params)
+                candidates.extend(
+                    item["title"]
+                    for item in data.get("query", {}).get("backlinks", [])
+                )
+                continuation = data.get("continue", {}).get("blcontinue")
+                if not continuation:
+                    break
+            candidates = list(dict.fromkeys(candidates))
+            self._conn.execute(
+                "INSERT OR REPLACE INTO backlink_candidate_cache("
+                "lang,target_folded,max_results,candidates_json,fetched_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    self.lang, target_folded, max_results,
+                    json.dumps(candidates, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+
         verified = list(cached)
         seen = {item.casefold() for item in verified}
+        uncached: list[str] = []
+        pages_by_candidate: dict[str, PageSnapshot] = {}
+        network_attempted: set[str] = set()
         for candidate in candidates:
             if candidate.casefold() in seen:
                 continue
-            try:
-                page = self.fetch_page(candidate, as_of=as_of)
-            except WikipediaError:
+            page = self._load_cached(candidate, as_of)
+            if page is None:
+                uncached.append(candidate)
+            else:
+                pages_by_candidate[candidate] = page
+        if uncached and self.backlink_verify_workers > 1:
+            network_attempted.update(uncached)
+            with ThreadPoolExecutor(
+                max_workers=self.backlink_verify_workers,
+            ) as executor:
+                fetched = executor.map(
+                    lambda candidate: self._fetch_page_network_only(candidate, as_of),
+                    uncached,
+                )
+                for candidate, page in zip(uncached, fetched, strict=True):
+                    if page is not None:
+                        pages_by_candidate[candidate] = page
+                        self._store_parsed_revision(
+                            page.revision_id, page.title, page.content, page.links,
+                        )
+                        self._store(candidate, page)
+        for candidate in candidates:
+            if candidate.casefold() in seen:
                 continue
+            page = pages_by_candidate.get(candidate)
+            if page is None:
+                if candidate in network_attempted:
+                    continue
+                try:
+                    page = self.fetch_page(candidate, as_of=as_of)
+                except WikipediaError:
+                    continue
             if any(link.target.casefold() == target_folded for link in page.links):
                 verified.append(page.title)
                 seen.add(page.title.casefold())
